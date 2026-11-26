@@ -1,0 +1,44 @@
+{
+ "pesos": {
+  "respaldo_13f_form4": 0.23444367474775374,
+  "stock_act": 0.11601581002032339,
+  "absorcion": 0.2102136811153747,
+  "backtest": 0.3296953131820754,
+  "confluencia": 0.10963152093447273
+ },
+ "prior": {
+  "respaldo_13f_form4": 0.25,
+  "stock_act": 0.1,
+  "absorcion": 0.2,
+  "backtest": 0.3,
+  "confluencia": 0.15
+ },
+ "mezcla_empirica": 0.5,
+ "evidencia": {
+  "absorcion": {
+   "z": -0.3612408051937143,
+   "n": 237,
+   "detalle": "ret60 media con absorcion +8.123% (n=62) vs sin +9.221% (n=175); bounce 64.5% vs 68.0%"
+  },
+  "backtest": {
+   "z": -0.1944876713347718,
+   "n": 206,
+   "detalle": "Spearman(bounce previo PIT del ticker, bounce actual) = -0.014 (n=206)"
+  },
+  "confluencia": {
+   "z": -2.101190180394982,
+   "n": 237,
+   "detalle": "Spearman(n_familias, ret60) = -0.149 (t=-2.30); t(has_logreg, ret60) = -2.10"
+  },
+  "respaldo_13f_form4": {
+   "z": -0.8215499198541052,
+   "n": 16,
+   "detalle": "solape rodante con zona 13F 25.0% vs control aleatorio 34.8% (n=16); z=-0.82"
+  },
+  "stock_act": {
+   "z": null,
+   "n": 0,
+   "detalle": "sin serie historica PIT en este repo: se mantiene a-priori"
+  }
+ }
+}

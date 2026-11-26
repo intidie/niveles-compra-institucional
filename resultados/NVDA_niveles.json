@@ -1,0 +1,267 @@
+{
+  "generado": "2026-11-26T18:21:30",
+  "n": 1,
+  "resultados": [
+    {
+      "ticker": "NVDA",
+      "fecha": "2026-11-26",
+      "capital": 1000.0,
+      "precio_actual": 149.3000030517578,
+      "zonas": [
+        {
+          "nivel": 1,
+          "r_inf": 104.51000213623047,
+          "r_sup": 118.57064892783224,
+          "p_centro": 111.54032553203135,
+          "dist_pct": -20.582286333425348,
+          "n_familias": 3,
+          "n_anclas": 3,
+          "familias": [
+            "logreg",
+            "ob",
+            "volumen"
+          ],
+          "tipos": [
+            "LOG",
+            "OB",
+            "VAH"
+          ],
+          "fuente": "LOG+OB+VAH",
+          "capital_asignado": 600.0,
+          "acciones": 5.060274236714253
+        },
+        {
+          "nivel": 2,
+          "r_inf": 144.8092173989905,
+          "r_sup": 148.55350303649902,
+          "p_centro": 146.68136021774478,
+          "dist_pct": -0.5,
+          "n_familias": 1,
+          "n_anclas": 1,
+          "familias": [
+            "avwap"
+          ],
+          "tipos": [
+            "AVWAP"
+          ],
+          "fuente": "AVWAP",
+          "capital_asignado": 200.0,
+          "acciones": 1.3463162827662218
+        },
+        {
+          "nivel": 3,
+          "r_inf": 130.14149741479415,
+          "r_sup": 140.8760164300625,
+          "p_centro": 135.50875692242832,
+          "dist_pct": -5.64232180141013,
+          "n_familias": 1,
+          "n_anclas": 1,
+          "familias": [
+            "logreg"
+          ],
+          "tipos": [
+            "LOG"
+          ],
+          "fuente": "LOG",
+          "capital_asignado": 200.0,
+          "acciones": 1.4196880708881305
+        }
+      ],
+      "errores": [],
+      "earnings": {
+        "fecha_str": "2027-02-24",
+        "dias_restantes": 90,
+        "alerta_activa": false,
+        "mensaje": "Próximo Reporte (Earnings): 2027-02-24 (en 90 días — Fuera de ventana de riesgo)"
+      },
+      "atr_semanal": 21.46903803053673,
+      "valoracion": {
+        "pe": {
+          "fuente": "SEC EDGAR XBRL (EarningsPerShareDiluted)",
+          "eps_ttm": 7.910000000000001,
+          "n_obs": 2452,
+          "desde": "2016-11-28",
+          "pe_actual": 18.874842357997192,
+          "percentiles": {
+            "P10": 30.33454657051649,
+            "P25": 40.88647467737381,
+            "P40": 46.68894713406736,
+            "P50": 50.75502311004628
+          },
+          "pisos": {
+            "P10": 239.94626337278547,
+            "P25": 323.4120146980269,
+            "P40": 369.30957183047286
+          }
+        },
+        "ev_fcf": {
+          "fuente": "SEC EDGAR XBRL (OCF - CapEx)",
+          "fcf_ttm": 134360000000.0,
+          "acciones": 24285000000.0,
+          "caja": 71565000000.0,
+          "deuda": 33366000000.0,
+          "n_obs": 2513,
+          "desde": "2016-11-28",
+          "percentiles": {
+            "P10": 32.6413021296415,
+            "P25": 40.453616869933626,
+            "P40": 47.22250466767707,
+            "P50": 53.224463800438485
+          },
+          "pisos": {
+            "P10": 182.16530179693774,
+            "P25": 225.38797457872275,
+            "P40": 262.8377486987479
+          },
+          "nota": "caja = efectivo + valores negociables corrientes; deuda = LongTermDebt (sin leases)"
+        },
+        "dcf": {
+          "fuente": "SEC EDGAR XBRL",
+          "fcf0": 134360000000.0,
+          "cagr_fcf_hist": 1.0537029532007178,
+          "g_inicial": 0.1,
+          "g_terminal": 0.025,
+          "tasa": 0.1,
+          "caja": 71565000000.0,
+          "deuda": 33366000000.0,
+          "acciones": 24100000000.0,
+          "vp_flujos": 627832285564.7905,
+          "vp_terminal": 1541477782660.0703,
+          "valor_intrinseco": 91.59788664833448,
+          "precios_mos": {
+            "MoS20": 73.27830931866758,
+            "MoS30": 64.11852065383414
+          }
+        },
+        "log_regresion": {
+          "anios": 9.990417522245037,
+          "cagr_tendencia": 0.6140023810749085,
+          "sd_log": 0.35970031553990434,
+          "fit_hoy": 232.42945003613818,
+          "bandas": {
+            "-1.5SD": 135.50875692242832,
+            "-2.0SD": 113.20338942019805
+          },
+          "r2": 0.9365644310221868
+        }
+      },
+      "n_valoracion_en_zona": 1,
+      "insiders": {
+        "compras": 0,
+        "acciones": 0.0,
+        "valor_usd": 0.0,
+        "transacciones_analizadas": 164
+      },
+      "respaldo13f": {
+        "n_con_posicion": 4,
+        "n_acumulando": 2,
+        "compras_form4_usd": 0.0
+      },
+      "stock_act": {
+        "pts": 6.0,
+        "compras": 249,
+        "ventas": 197,
+        "resumen": "Flujo Congreso (STOCK Act): 249 Compras vs 197 Ventas totales (40% compras en últimas 15 ops)"
+      },
+      "backtest_resumen": {
+        "n_fechas": 60,
+        "n_ordenes": 51,
+        "n_fills": 30,
+        "fill_rate": 0.5882352941176471,
+        "fill_profundo": 0.1,
+        "dias_medios_fill": 12.333333333333334,
+        "absorcion": 0.16666666666666666,
+        "bounce": 0.8,
+        "ret20_media": 0.04169191456262738,
+        "ret20_mediana": 0.03651499250406909,
+        "ret20_n": 30,
+        "base20_media": 0.0378097407238994,
+        "base20_mediana": 0.027248482596447188,
+        "ret60_media": 0.20986584036275927,
+        "ret60_mediana": 0.19811634361563313,
+        "ret60_n": 30,
+        "base60_media": 0.14014817984135322,
+        "base60_mediana": 0.0840018190136882,
+        "ret120_media": 0.44430664440448714,
+        "ret120_mediana": 0.3972130613041702,
+        "ret120_n": 30,
+        "base120_media": 0.3405232477149029,
+        "base120_mediana": 0.22944346632602852,
+        "ret252_media": 1.0714224187946637,
+        "ret252_mediana": 0.6799060134008567,
+        "ret252_n": 26,
+        "base252_media": 0.997167579257364,
+        "base252_mediana": 0.592155154008441,
+        "mae60_media": -0.15080351460135966,
+        "mae60_mediana": -0.1510898950510013,
+        "base_mae60_mediana": -0.09940671203806267,
+        "mae252_media": -0.23430482551035722,
+        "mae252_mediana": -0.2052873863667497,
+        "base_mae252_mediana": -0.15364135036343607
+      },
+      "confluencia_score": 60.0,
+      "confiabilidad": {
+        "indice": 46.2706646424859,
+        "cobertura": 1.0,
+        "detalle": {
+          "respaldo_13f_form4": {
+            "valor": 25.0,
+            "peso_efectivo": 0.23444367474775374
+          },
+          "stock_act": {
+            "valor": 40.0,
+            "peso_efectivo": 0.11601581002032339
+          },
+          "absorcion": {
+            "valor": 16.666666666666664,
+            "peso_efectivo": 0.2102136811153747
+          },
+          "backtest": {
+            "valor": 77.9128083959199,
+            "peso_efectivo": 0.3296953131820754
+          },
+          "confluencia": {
+            "valor": 60.0,
+            "peso_efectivo": 0.10963152093447273
+          }
+        }
+      },
+      "score_ranking": 53.13533232124295,
+      "form4_compras": [],
+      "respaldo13f_detalle": [
+        {
+          "gestor": "Vanguard Group",
+          "periodo": "2025-12-31",
+          "acciones": 2266683275.0,
+          "valor_usd": 422736430797.0,
+          "acciones_previas": 2223533800.0,
+          "cambio_pct": 1.9405810246734274
+        },
+        {
+          "gestor": "State Street",
+          "periodo": "2026-09-30",
+          "acciones": 1025075347.0,
+          "valor_usd": 234355573846.0,
+          "acciones_previas": 1009783437.0,
+          "cambio_pct": 1.5143752055818283
+        },
+        {
+          "gestor": "Bridgewater",
+          "periodo": "2026-09-30",
+          "acciones": 2688221.0,
+          "valor_usd": 613935912.0,
+          "acciones_previas": 3866195.0,
+          "cambio_pct": -30.468561466765127
+        },
+        {
+          "gestor": "Renaissance Technologies",
+          "periodo": "2026-09-30",
+          "acciones": 23170.0,
+          "valor_usd": 5327269.0,
+          "acciones_previas": 7091256.0,
+          "cambio_pct": -99.67325957489054
+        }
+      ]
+    }
+  ]
+}
