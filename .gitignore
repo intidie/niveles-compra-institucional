@@ -7,3 +7,6 @@ __pycache__/
 *.sqlite
 congress-trading-monitor/
 .env
+_cache/
+*.pkl
+resultados/
