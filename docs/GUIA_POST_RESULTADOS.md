@@ -17,46 +17,57 @@ Explicación sencilla del resultado de `main.py`. Las cifras provienen de `docs/
 |---|---|---|
 | N1-N4 | Zonas ordenadas por **fuerza** (más familias coinciden; si empatan, más anclas; luego la más cercana). **No** por cercanía. Máximo 4. | Consola, `_zonas.csv` |
 | r_inf / r_sup | Borde bajo y borde alto de la zona. Tu orden límite va en **r_sup**. | Consola, gráfico |
-| Distancia % | Qué tan abajo del precio actual está r_sup. `-12.0 %` = 12 % más barato. Las zonas están entre 0.5 % y 30 % bajo el precio. | Consola (`dist_pct`) |
+| Distancia % (`dist. a r_sup`) | Qué tan abajo del precio actual está **r_sup**, el precio de tu orden límite GTC. `-12.0 %` = 12 % más barato. Es la **misma referencia** en consola, gráfico, UI y export (nunca al centro de la zona). Las zonas están entre 0.5 % y 30 % bajo el precio. | Consola, gráfico, UI, export (`dist_pct`) |
 | Familias | Tipos distintos de ancla que coinciden: volumen, avwap, ob, swing, logreg. Más familias = zona con más "razones", no más seguridad. | Consola |
-| Capital y acciones | Reparto del `--capital` entre las 3 primeras zonas, proporcional a sus familias. Acciones = capital / r_sup. N4 recibe $0. | Consola |
-| Fill Rate | De cada 100 órdenes en el historial, cuántas se llenaron en 63 ruedas. | Solo export (`bt_fill_rate`) |
+| Capital y acciones | Reparto del `--capital` **de ese ticker** entre sus 3 primeras zonas, proporcional a sus familias. Acciones = capital / r_sup. N4 recibe $0. En modo watchlist cada ticker recibe el capital completo (no se reparte entre tickers). | Consola |
+| Fill Rate | De cada 100 órdenes en el historial, cuántas se llenaron en 63 ruedas. Solo del **rango primario (N1)**, con un backtest de 5 años (`--anios-backtest`). | Consola (línea Backtest), export (`bt_fill_rate`) |
 | Bounce Rate | Tras llenarse: % de casos que subió +5 % antes de caer bajo r_inf menos 3 %, dentro de 20 ruedas. | Export (`bt_bounce`) |
 | MAE | Peor caída desde la entrada (mínimo intradía) en 60 o 252 ruedas. | Export (`bt_mae60_mediana`; JSON: mae252) |
 | Confluencia (0-100) | 60 % por familias de la zona + 40 % por anclas de valoración en la zona (máx. 2). | Consola |
-| Confiabilidad (0-100) | Promedio ponderado de 5 componentes (13F/Form 4, STOCK Act, absorción, backtest, confluencia). | Consola |
-| Cobertura | Qué parte de los pesos tenía dato. 100 % = los 5 componentes presentes. | Consola |
-| Ranking | Promedio simple de Confluencia y Confiabilidad. Solo en modo watchlist. | Tabla batch |
+| Confiabilidad (0-100) | Promedio ponderado de 5 componentes (13F/Form 4, STOCK Act, absorción, backtest, confluencia). Un componente sin dato se **excluye**; no cuenta como 0 ni como neutro. | Consola, UI |
+| Cobertura | Qué parte de los pesos tenía dato. 100 % = los 5 componentes presentes. Junto a ella sale `sin dato: ...` con los componentes excluidos. | Consola (`cobertura`), UI, export (`confiabilidad_sin_dato`) |
+| Ranking | Promedio simple de Confluencia y Confiabilidad: ayuda para ordenar, no una señal. Solo en modo watchlist. | Tabla batch, pestaña Watchlist |
+| Avisos | Datos que faltan o son poco fiables: `muestra pequeña: N fills`, `13f: no respondieron: ...`, `STOCK Act no disponible`. | Consola (`[aviso]`), UI, export (`avisos`) |
 | Aviso earnings | Alerta si el reporte de resultados está a 10 días o menos. | JSON (`earnings`) y `app_ui.py` |
 
-Nota: en consola solo salen zonas, confluencia, confiabilidad, ranking y el **conteo** de advertencias. Fill Rate,
-Bounce, retornos y MAE están en el CSV/JSON exportado. El backtest del screener usa 5 años por defecto
-(`--anios-backtest 5`, unas 60 fechas mensuales), una muestra pequeña y ruidosa por ticker.
+Nota: en consola salen zonas, confluencia, confiabilidad (con cobertura y `sin dato`), una línea de Backtest, los
+avisos y el **conteo** de etapas con fallo. Retornos y MAE a 120/252 ruedas están en el CSV/JSON exportado. El
+backtest del screener es solo del **rango primario (N1)** y usa 5 años por defecto (`--anios-backtest 5`, unas 60
+fechas mensuales): una muestra pequeña y ruidosa por ticker, **no comparable con el pool** de `docs/METODOLOGIA.md`
+(6 tickers, 10 años). Con menos de 10 fills sale el aviso `muestra pequeña: N fills`: trata esas cifras como ruido.
 
 ### Ejemplo ilustrativo (ticker ficticio, no son datos reales)
 ```
-=== EJEMPLO | Precio $100.00 | Capital $1,000 ===
-  N1: $85.00 - $88.00 (-12.0%) | 3 familias [avwap, ob, volumen] | $500 -> 5.682 acc. @ $88.00
-  N2: $92.00 - $94.00 (-6.0%)  | 2 familias [swing, volumen]     | $333 -> 3.546 acc. @ $94.00
-  N3: $79.00 - $81.00 (-19.0%) | 1 familias [logreg]             | $167 -> 2.058 acc. @ $81.00
-  N4: $70.00 - $72.00 (-28.0%) | 1 familias [swing]              | $0 -> 0.000 acc. @ $72.00
+=== EJEMPLO | Precio $100.00 | Capital por ticker $1,000 ===
+  N1: $85.00 - $88.00 (dist. a r_sup -12.0%) | 3 familias [avwap, ob, volumen] | $500 -> 5.682 acc. @ $88.00
+  N2: $92.00 - $94.00 (dist. a r_sup -6.0%)  | 2 familias [swing, volumen]     | $333 -> 3.546 acc. @ $94.00
+  N3: $79.00 - $81.00 (dist. a r_sup -19.0%) | 1 familias [logreg]             | $167 -> 2.058 acc. @ $81.00
+  N4: $70.00 - $72.00 (dist. a r_sup -28.0%) | 1 familias [swing]              | $0 -> 0.000 acc. @ $72.00
   Confluencia: 60.0/100 | Confiabilidad institucional: 42.5/100 (cobertura 100%) | Ranking: 51.3
+  Backtest (rango primario (N1), backtest de 5 años; no comparable con el pool de docs/METODOLOGIA.md): 14 fills de 40 ordenes | fill 35% | bounce 67% | MAE60 mediana -8%
 ```
 * N1 es la zona más "fuerte" (3 familias), pero N2 está más cerca y se llenaría antes. El número N no indica cercanía.
 * Reparto: familias 3, 2 y 1 suman 6, así que 50 %, 33 % y 17 % de $1,000. N4 queda fuera del reparto.
 * Confiabilidad ilustrativa: respaldo 25, STOCK Act 50, absorción 26, backtest 57, confluencia 60. Con los pesos
   calibrados da 42.5. Ranking = (60 + 42.5) / 2 = 51.3. Un 42.5 **no** significa "42.5 % de probabilidad".
-* Backtest ilustrativo del ticker: Fill Rate 35 %, Bounce 67 %, MAE60 mediano -8 %. Son valores parecidos al pool
-  real (34.4 %, 66.9 %, -8.4 %) solo para que el ejemplo sea creíble.
+* Backtest ilustrativo del ticker: Fill Rate 35 %, Bounce 67 %, MAE60 mediano -8 %, con 14 fills (por encima de 10,
+  así que no sale el aviso de muestra pequeña). Son valores parecidos al pool real (34.4 %, 66.9 %, -8.4 %) solo
+  para que el ejemplo sea creíble; el pool **no** es comparable con la cifra de un ticker (otra muestra y otra ventana).
 
 ## 3. Checklist paso a paso
 
 ### (a) Revisar avisos, errores, datos faltantes y cobertura
 - [ ] Si la consola dice "Advertencias: N etapa(s)", abre el CSV (columna `errores`) o el JSON. Etapas posibles: mercado, earnings, zonas, valoracion, form4, 13f, stock_act, backtest, scoring.
+- [ ] Lee las líneas `[aviso]` de la consola (columna `avisos` del CSV): `muestra pequeña: N fills` (menos de 10 ejecuciones simuladas: Bounce, Fill y MAE son ruido), `13f: no respondieron: X, Y`, `STOCK Act no disponible` y, si falló la valoración, `valoracion no disponible`.
 - [ ] Si falla "mercado" no hay zonas; en batch el ticker aparece en "Sin datos" y queda fuera del ranking.
-- [ ] Mira la **cobertura**. Con los pesos actuales, `--sin-sec` deja ~65 % y `--sin-backtest` ~46 %. Con poca cobertura el índice es el promedio de lo poco que hay; no lo compares con otro ticker de cobertura distinta.
-- [ ] Trampas del cálculo (según el código): si STOCK Act no responde devuelve un valor neutro (7.5 pts = 50/100) que **cuenta como dato**; si falla Form 4, sus compras se cuentan como 0 y el índice baja; si un gestor 13F falla, se omite en silencio, así que "0 gestores con posición" puede ser falta de dato.
-- [ ] El 13F del screener cruza solo 5 gestores (Berkshire, Vanguard, State Street, Bridgewater, Renaissance). Vanguard y State Street son pasivos de índice y aquí sí cuentan como "acumulando".
+- [ ] Mira la **cobertura** y la lista `sin dato: ...`. Con los pesos actuales, sin STOCK Act queda ~88 %, `--sin-sec` ~65 % y `--sin-backtest` ~46 %. Con poca cobertura el índice es el promedio de lo poco que hay; no lo compares con otro ticker de cobertura distinta (la pestaña Watchlist lo avisa).
+- [ ] **Un dato no disponible no cuenta como cero ni como neutro; se excluye y la cobertura baja:**
+  - STOCK Act que no responde (`pts=None`, `disponible=False`) se excluye (ya no vale 7.5 neutro). Si se consultó bien y no hay operaciones del ticker, da 0 pts y **sí** es dato (puntúa 0).
+  - Form 4 fallido ya no cuenta como 0 USD: se excluye esa mitad del componente 13F/Form 4 (queda la mitad de gestores). Consultado sin compras de insiders sí vale 0.
+  - 13F: los gestores que no respondieron se listan en el aviso; si no respondió ninguno, o no respondió ningún gestor **activo** (aunque sí respondan Vanguard y State Street, que no cuentan), la mitad de gestores es "no disponible" (no "0 gestores"): sale el aviso `13f: no respondió ningún gestor activo (...)`. Si respondió al menos un activo y ninguno tiene posición, 0 es un dato válido.
+  - Valoración (P/E, EV/FCF, DCF): si no se pudo consultar (yfinance), esa parte de la confluencia se **excluye** y el score se reescala con las familias, con el aviso `valoracion ... no disponible`. Si se consultó y ninguna ancla cae en la zona, vale 0 (es un dato).
+- [ ] El 13F del screener cruza solo 5 gestores (Berkshire, Vanguard, State Street, Bridgewater, Renaissance). Vanguard y State Street son pasivos de índice y **ya no cuentan** como "acumulando" (ni en el conteo ni en los marcadores del gráfico): quedan 3 activos, así que la fracción es muy gruesa (0, 1/3, 2/3 o 1).
+- [ ] Limitaciones que aún quedan: el 13F en vivo compara los dos últimos 13F-HR **sin ajustar `cambio_pct` por splits** (`case_studies.py` sí lo hace), así que un split entre ambos trimestres puede verse como compra o venta. Dentro del componente backtest, con bounce disponible pero sin retorno o MAE mediano a 60 ruedas se usan 0 y 0.5 (excepción residual). La lista `sin dato` se deriva de los componentes que faltan en el detalle del índice.
 
 ### (b) Revisar la proximidad de earnings
 - [ ] Busca `earnings` en el JSON (o las tarjetas de `app_ui.py`): la consola de `main.py` no lo imprime.
@@ -66,9 +77,9 @@ Bounce, retornos y MAE están en el CSV/JSON exportado. El backtest del screener
 
 ### (c) Contrastar con el gráfico y los marcadores
 Abre `resultados/<TICKER>_niveles.png`.
-- Banda de color = zona; línea discontinua = centro; la etiqueta `N1: $… (%)` mide la distancia al **centro** (la consola la mide a r_sup).
+- Banda de color = zona; línea discontinua = **r_sup** (tu límite GTC); la etiqueta `N1: $inf-$sup | dist. a r_sup -X% | …` mide la distancia de r_sup al precio actual, igual que la consola, la UI y el export.
 - Triángulo verde = compra de insider Form 4 código P (últimos 365 días, hasta 60 filings).
-- Diamante y banda violeta = trimestre 13F con compra neta (el 13F no da fecha exacta y llega con hasta 45 días de rezago).
+- Diamante y banda violeta = trimestre 13F con compra neta de algún gestor **activo** (Vanguard y State Street no cuentan; el 13F no da fecha exacta y llega con hasta 45 días de rezago).
 - Barras naranjas laterales = nodos de alto volumen (HVN) de los últimos 5 años. El precio del gráfico está ajustado por splits y dividendos.
 - Pregúntate: ¿el precio ya reaccionó ahí antes? ¿La zona queda muy lejos? Los marcadores 13F/Form 4 son contexto, **no** confirmación (ver sección 5).
 
@@ -76,14 +87,14 @@ Abre `resultados/<TICKER>_niveles.png`.
 - `--capital` es el dinero para **ese ticker** (por defecto $1,000), no tu patrimonio.
 - Fórmula del sistema: `capital × familias de la zona / suma de familias de las 3 primeras zonas`. Es un criterio simple (más confluencia, más peso), **no probado**: en el backtest, más familias no dio mejores retornos a 60 ruedas (Spearman -0.149).
 - Es una guía, no una orden: puedes dividir a partes iguales o reducir tramos lejanos.
-- En modo watchlist **cada ticker recibe el capital completo** (`analizar_ticker(t, args.capital)`). Si escaneas 10 y todo se llena necesitarías 10 veces el capital. Decide primero tu presupuesto total y divídelo tú.
+- En modo watchlist **cada ticker recibe el capital completo** (`analizar_ticker(t, args.capital)`; la ayuda de `--capital`, el encabezado del ranking, el export y la pestaña Watchlist lo dicen). Si escaneas 10 y todo se llena necesitarías 10 veces el capital. Decide primero tu presupuesto total y divídelo tú.
 - El sistema no calcula stop ni % de riesgo. Traduce el MAE: a 252 ruedas el peor punto fue -16.3 % (mediana) y -21.4 % (media). En $1,000 son unos $163 a $214 de pérdida temporal. Dimensiona tu posición según lo que podrías soportar.
 
 ### (e) Órdenes límite escalonadas
 - Orden límite: "compra solo si el precio baja a X o menos". **GTC** (Good Till Canceled): sigue activa hasta que se llene o la canceles; algunos brókers la vencen antes (verifica con el tuyo).
 - El backtest asume: orden GTC en **r_sup**, vida de **63 ruedas** (~3 meses). Cuenta como llenada si el mínimo del día es menor o igual a r_sup. El precio de entrada es el menor entre la apertura y r_sup (si abre con gap hacia abajo, compras más barato que tu límite).
 - Escalonar = una orden por zona, con las acciones indicadas. En el ejemplo: 5.682 @ $88.00, 3.546 @ $94.00 y 2.058 @ $81.00 (si tu bróker no admite fracciones, redondea).
-- Solo se auditó el rango primario (N1) del historial; la combinación de órdenes y las zonas N2-N4 no se probaron una por una.
+- Solo se auditó el rango primario (N1), con 5 años de historial por defecto (unos 10 a 33 fills, estimación; la consola muestra los reales); la combinación de órdenes y las zonas N2-N4 no se probaron una por una.
 - Expectativas del pool: se llena ~1 de cada 3 (34.4 %); MSFT 17.7 % y OXY 58.1 %; tarda 14.4 ruedas de media.
 - El backtest es optimista: un toque exacto cuenta como llenado y no modela comisiones, impuestos ni liquidez.
 - **Si no se llena** en ~63 ruedas: no la dejes olvidada. Cancela, recalcula el screener y coloca órdenes nuevas con las zonas vigentes. No subas el límite "para asegurar" el llenado.
@@ -92,7 +103,7 @@ Abre `resultados/<TICKER>_niveles.png`.
 | Situación | Qué mostró el historial (pool, 6 tickers) | Qué hacer |
 |---|---|---|
 | **Toca y se llena** | MAE60 mediano -8.4 % (media -11.8 %); MAE252 mediano -16.3 % (media -21.4 %). Rebote +5 % en 20 ruedas: 66.9 % (1 de cada 3 no lo logró). | Asume que el precio **probablemente baje más** antes de subir: compraste tras una caída. Ejemplo: entrada $88.00 con MAE60 mediano -8.4 % = mínimo típico cerca de $80.61 (la mitad de los casos fue peor). No agregues dinero fuera del plan; para eso están las zonas inferiores. |
-| **Confirmación vs. recibir el golpe** | Hubo "absorción" (vela de rechazo con volumen > 1.35 x SMA20, cierre en el tercio superior) en 26.3 % de los llenados. Con absorción el retorno medio a 60 ruedas fue menor (+8.12 % vs +9.22 % sin absorción). | Esperar confirmación **no tiene respaldo** en estos datos y sale más caro. Elige antes una vía (límite y aceptar MAE, o entrar tras confirmar y aceptar menos llenados) y no la cambies a mitad. Ninguna regla de confirmación fue probada. |
+| **Confirmación vs. recibir el golpe** | Hubo "absorción" (vela de rechazo con volumen > 1.35 x SMA20, cierre en el tercio superior, en las 6 velas desde el toque: la del toque y las 5 siguientes) en 26.3 % de los llenados. Con absorción el retorno medio a 60 ruedas fue menor (+8.12 % vs +9.22 % sin absorción). | Esperar confirmación **no tiene respaldo** en estos datos y sale más caro. Elige antes una vía (límite y aceptar MAE, o entrar tras confirmar y aceptar menos llenados) y no la cambies a mitad. Ninguna regla de confirmación fue probada. |
 | **La perfora** | "Rebote fallido" = mínimo bajo r_inf menos 3 % (ej. r_inf $85 -> $82.45) en 20 ruedas. Es una regla de medición, no un stop probado. Solo el 5.9 % de los llenados ya tocaba r_inf el mismo día del llenado. | Es la señal de que la estructura dejó de sostener. Pausa los tramos pendientes, recalcula zonas, revisa fundamentales (nuevo 10-Q) y decide con una regla escrita de antemano. |
 | **Nunca llega** | ~65.6 % de las órdenes no se llenó en 63 ruedas. El costo de oportunidad de esos casos no se midió. | No perseguir: no subir el límite ni comprar por impulso. Recalcula en la fecha prevista. Acepta que puedes quedarte fuera. |
 
@@ -113,14 +124,15 @@ Abre `resultados/<TICKER>_niveles.png`.
 - **Revisión periódica:** mensual (zonas y órdenes vivas), trimestral (10-Q, 13F, earnings) y anual (tesis). Anota fecha, zona, precio de entrada y MAE vivido para compararlos con lo esperado.
 
 ## 4. Cómo usar el ranking de la Watchlist
-- Ranking = promedio de Confluencia y Confiabilidad (si falta una, usa la otra; sin score va al final). Se muestran `--top` activos (10 por defecto) con su Zona 1 (= N1).
-- **Úsalo para decidir qué ticker revisar primero** y dedicarle tiempo de análisis. No para decidir cuánto comprar ni cuál subirá.
+- Ranking = promedio de Confluencia y Confiabilidad (si falta una, usa la otra; sin score va al final). Se muestran `--top` activos (10 por defecto) con su Zona 1 (= N1), la distancia a r_sup y la cobertura.
+- **Es una ayuda de organización, no una señal.** Úsalo para decidir qué ticker revisar primero y dedicarle tiempo de análisis. No para decidir cuánto comprar ni cuál subirá.
+- Cada ticker lleva el **capital completo**: el ranking no reparte dinero entre tickers.
 - Qué NO concluir:
-  - La tabla **no muestra la distancia**: la Zona 1 puede estar 20 % abajo (usa `z1_dist_pct` del CSV).
-  - La confluencia pesa ~55 % del ranking (50 % directo y parte del índice, con pesos 0.5 + 0.5 x 0.11). Justo ese componente tiene la peor evidencia (Spearman con ret60 = -0.149, t = -2.30).
+  - La Zona 1 puede estar muy abajo: mira la columna de distancia a r_sup (consola y pestaña Watchlist) o `z1_dist_pct` del CSV.
+  - El ranking está **dominado por la confluencia**: pesa 55.5 % del score (0.5 directo + 0.5 x 0.1096 como componente de la confiabilidad, con el peso de `pesos_calibrados.json` y cobertura 100 %); sube con menos cobertura (58.4 % con `--sin-sec`, 61.9 % con `--sin-backtest`). Justo ese componente tiene la peor evidencia propia (Spearman con ret60 = -0.149, t = -2.30): **no hay respaldo de que más familias mejoren el retorno**.
   - Score alto no significa mejores resultados (ver sección 5).
   - No incorpora calidad del negocio, valoración completa ni earnings.
-  - Comparar scores con coberturas distintas (SEC o backtest apagados) no es justo.
+  - Comparar scores con coberturas distintas (SEC o backtest apagados, componentes `sin dato`) no es justo.
 
 ## 5. Lo que los datos dicen con honestidad
 | Hallazgo (METODOLOGIA.md) | Dato | Consecuencia práctica |
@@ -130,7 +142,8 @@ Abre `resultados/<TICKER>_niveles.png`.
 | MAE peor que la base | 60 ruedas: -8.4 % vs -6.6 %. 252 ruedas: -16.3 % vs -11.9 %. | Esperar el nivel implica comprar mientras cae. Cuenta con sufrir más que si comprases "a mercado". |
 | Caso OXY | Mediana negativa a 60/120/252 ruedas. | Una zona puede fallar durante meses. |
 | Muestra 13F pequeña | 16 trimestres con compra neta. Solape estricto 0.0 %; rodante 25.0 % vs 34.8 % de un control aleatorio; toque estricto 18.8 %; distancia mediana VWAP a la zona más cercana 15.2 %. Berkshire/AAPL: 0 de 9 trimestres solapan. | Los fondos compraron cerca del mercado y en tendencia; el algoritmo propone zonas profundas. Los niveles **no** coinciden mejor que el azar con las compras 13F. No los uses como "dónde compra el dinero grande". |
-| Sesgos | 6 tickers grandes y ganadores (supervivencia), 10 años mayormente alcistas, órdenes mensuales solapadas (t-stat inflados), sin costos/impuestos/liquidez, Form 4 y STOCK Act sin probar, valoración XBRL no auditada, umbrales fijados a priori (+5 %/20 d, -3 %, 5 ruedas). | Los números son orientativos y optimistas. Los pesos calibrados son casi los a priori: no son evidencia de poder predictivo. |
+| Sesgos | 6 tickers grandes y ganadores (supervivencia), 10 años mayormente alcistas, órdenes mensuales solapadas (t-stat inflados), sin costos/impuestos/liquidez, Form 4 y STOCK Act sin probar, valoración XBRL no auditada, umbrales fijados a priori (+5 %/20 d, -3 %, ventana de absorción de 6 velas). | Los números son orientativos y optimistas. Los pesos calibrados son casi los a priori: no son evidencia de poder predictivo. |
+| Backtest del screener ≠ pool | Solo rango primario (N1), 5 años por defecto, ~60 fechas mensuales: del orden de 10 a 33 fills por ticker (estimación). El pool usa 6 tickers y 10 años. | Fill, Bounce y MAE de un ticker son más ruidosos y **no comparables** con el pool; con menos de 10 fills la consola avisa `muestra pequeña`. |
 
 Conclusión práctica:
 - Los niveles sirven como **herramienta de disciplina**: definir de antemano dónde estaría tu entrada, cuánto repartes y cuánta caída aceptas. No son una señal predictiva.
@@ -143,6 +156,10 @@ Conclusión práctica:
 | Comprar a mercado "porque tocó" la zona | El backtest asume orden límite en r_sup; comprar a mercado en otro punto es otra estrategia, no auditada. |
 | Ignorar el MAE | A 252 ruedas el peor punto fue -16.3 % (mediana) y -21.4 % (media). Si no lo soportas, reduce el tamaño. |
 | Concentrar todo en un ticker | El capital es por ticker; el sistema no diversifica por ti. |
+| Sumar el capital de varios tickers como un solo presupuesto | En modo watchlist cada ticker recibe el capital completo: con 10 tickers llenos necesitarías 10 veces ese capital. |
+| Comparar scores con cobertura distinta | Un score con backtest y otro sin él (o con componentes `sin dato`) promedian cosas distintas. |
+| Tratar el ranking como señal | Está dominado por la confluencia (55.5 %), que no mostró relación positiva con el retorno. Solo ordena tu lista de revisión. |
+| Leer el backtest del ticker como el pool | 5 años, solo N1 y pocos fills; con `muestra pequeña: N fills` es ruido. |
 | Olvidar los earnings | La consola no los imprime; un gap de resultados puede llenar o romper la orden. |
 | Tratar el índice como probabilidad | 42.5 no es "42.5 % de acierto"; el índice no discrimina resultados. |
 | Creer que N1 es la más cercana | N1 es la más "fuerte"; puede estar a -20 % y no llenarse en meses. |
@@ -159,11 +176,13 @@ Conclusión práctica:
 | Anchored VWAP (AVWAP) | Precio medio ponderado por volumen desde un evento clave (Shannon). |
 | Order Block | Zona semanal de actividad fuerte aún no "mitigada" (concepto Smart Money; sin respaldo académico formal). |
 | Confluencia | Cuántas familias de ancla coinciden en una zona (volumen, avwap, ob, swing, logreg). |
-| Fill Rate | % de órdenes límite que se llenan dentro de su vida (63 ruedas). |
+| Fill Rate | % de órdenes límite que se llenan dentro de su vida (63 ruedas). En el screener, del rango primario (N1) y 5 años. |
 | Bounce Rate | % de llenados que suben +5 % antes de perder r_inf menos 3 %, en 20 ruedas. |
 | MAE | Maximum Adverse Excursion: la peor caída desde la entrada (mínimo intradía). |
 | Línea base | Comprar al cierre en cada fecha de recálculo, sin esperar la zona. Sirve para comparar. |
-| 13F-HR / Form 4 (P) | 13F: tenencias trimestrales de gestores grandes, sin fecha de compra. Form 4 código P: compras de insiders en mercado abierto (SEC EDGAR). |
+| 13F-HR / Form 4 (P) | 13F: tenencias trimestrales de gestores grandes, sin fecha de compra; el screener cuenta solo los gestores **activos** (no Vanguard ni State Street, pasivos de índice). Form 4 código P: compras de insiders en mercado abierto (SEC EDGAR). |
+| Cobertura / `sin dato` | Parte del peso de la confiabilidad que tuvo dato. Lo que no se pudo consultar se excluye (no es 0 ni neutro) y baja la cobertura. |
+| `dist. a r_sup` | Distancia % del límite GTC (r_sup) al precio actual; negativa = por debajo. Misma referencia en consola, gráfico, UI y export. |
 
 ---
 **Material educativo; no constituye asesoría financiera ni recomendación de inversión.**

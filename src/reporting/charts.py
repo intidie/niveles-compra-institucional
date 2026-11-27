@@ -16,6 +16,22 @@ PALETA = ["#2ea043", "#1f883d", "#00b4d8", "#a371f7"]
 COLS_FECHA = ("Date", "TransactionDate", "Transaction Date", "Transaction_Date", "date", "fecha", "Filing Date")
 COLS_PRECIO = ("Price", "price", "precio")
 
+# Referencia UNICA de distancia en todo el proyecto (consola, grafico, UI, export): r_sup, el precio del limite GTC.
+ETIQUETA_DIST_RSUP = "dist. a r_sup"
+
+
+def dist_a_r_sup_pct(r_sup: float, precio: float) -> float | None:
+    """Distancia % de ``r_sup`` (precio de la orden limite GTC) al precio actual: ``(r_sup / precio - 1) * 100``.
+
+    Negativo = la zona esta por debajo del precio. Es la UNICA formula de distancia que usan ``main.py``, el grafico
+    y ``app_ui.py``; ``None`` si el precio no es valido.
+    """
+    try:
+        r, p = float(r_sup), float(precio)
+    except (TypeError, ValueError):
+        return None
+    return (r / p - 1.0) * 100.0 if np.isfinite(r) and np.isfinite(p) and p > 0 else None
+
 
 def _col(df: pd.DataFrame, candidatas):
     return next((c for c in candidatas if c in df.columns), None)
@@ -75,12 +91,20 @@ def marcadores_form4(form4: pd.DataFrame | None, df: pd.DataFrame) -> pd.DataFra
     return out
 
 
-def trimestres_acumulacion(r13f: pd.DataFrame | None, df: pd.DataFrame) -> list[pd.Timestamp]:
-    """Fines de trimestre 13F con compra neta (cambio_pct > 0 o posicion nueva) dentro del rango del grafico."""
+def trimestres_acumulacion(r13f: pd.DataFrame | None, df: pd.DataFrame, solo_activos: bool = True) -> list[pd.Timestamp]:
+    """Fines de trimestre 13F con compra neta (cambio_pct > 0 o posicion nueva) dentro del rango del grafico.
+
+    ``solo_activos`` (def.) ignora las filas con ``pasivo`` verdadero (Vanguard / State Street: flujos de indice, no
+    conviccion), igual que el conteo de gestores del screener.
+    """
     if r13f is None or not isinstance(r13f, pd.DataFrame) or r13f.empty or "periodo" not in r13f.columns:
         return []
     if df is None or df.empty:
         return []
+    if solo_activos and "pasivo" in r13f.columns:
+        r13f = r13f[~r13f["pasivo"].fillna(False).astype(bool)]
+        if r13f.empty:
+            return []
     z = pd.Series(0.0, index=r13f.index)
     cambio = pd.to_numeric(r13f.get("cambio_pct", z), errors="coerce")
     previas = pd.to_numeric(r13f.get("acciones_previas", z), errors="coerce").fillna(0)
@@ -113,7 +137,10 @@ def graficar_niveles(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
                      precio_actual: float | None = None, form4: pd.DataFrame | None = None,
                      r13f: pd.DataFrame | None = None, subtitulo: str | None = None,
                      ruta_guardado: str | None = None, mostrar: bool = False):
-    """Devuelve la Figure. ``zonas``: dicts con r_inf, r_sup (y opcional p_centro, fuente, nivel)."""
+    """Devuelve la Figure. ``zonas``: dicts con r_inf, r_sup (y opcional fuente, nivel).
+
+    La linea discontinua y la distancia de cada etiqueta usan ``r_sup`` (limite GTC), igual que consola y UI.
+    """
     titulo = f"{ticker} - Mapa de niveles institucionales"
     if df is None or df.empty or not {"Open", "High", "Low", "Close", "Volume"}.issubset(df.columns):
         fig = _figura_vacia(titulo, "Sin datos de mercado disponibles (red o ticker invalido)")
@@ -145,7 +172,7 @@ def graficar_niveles(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
     q13 = trimestres_acumulacion(r13f, d)
     for i, q in enumerate(q13):
         ax_p.axvspan(q - pd.DateOffset(months=3), q, color="#a371f7", alpha=0.10, zorder=1,
-                     label="Trimestre de acumulacion 13F" if i == 0 else None)
+                     label="Trimestre de acumulacion 13F (gestores activos)" if i == 0 else None)
         y = float(d["Close"].reindex([q], method="nearest").iloc[0])
         ax_p.scatter([q], [y], marker="D", s=60, color="#a371f7", edgecolor="white", linewidth=0.6, zorder=8,
                      label="Cierre trimestre 13F (acumula)" if i == 0 else None)
@@ -161,13 +188,18 @@ def graficar_niveles(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
     for i, z in enumerate(zonas):
         c = PALETA[i % len(PALETA)]
         lo, hi = float(z["r_inf"]), float(z["r_sup"])
-        centro = float(z.get("p_centro", (lo + hi) / 2))
         ax_p.axhspan(lo, hi, color=c, alpha=0.16, zorder=1)
-        ax_p.axhline(centro, color=c, linestyle="--", linewidth=1.2, alpha=0.9, zorder=3)
-        ax_v.axhline(centro, color=c, linestyle="--", linewidth=1.0, alpha=0.7, zorder=3)
+        # La linea discontinua marca r_sup (el limite GTC) y la distancia se mide siempre hasta ella.
+        ax_p.axhline(hi, color=c, linestyle="--", linewidth=1.2, alpha=0.9, zorder=3,
+                     label="Limite GTC en r_sup (techo de cada zona)" if i == 0 else None)
+        ax_v.axhline(hi, color=c, linestyle="--", linewidth=1.0, alpha=0.7, zorder=3)
         fuente = str(z.get("fuente", ""))
         fuente = fuente if len(fuente) <= 48 else fuente[:45] + "..."
-        ax_p.text(x_lbl, centro, f" N{z.get('nivel', i + 1)}: ${centro:.2f} ({(centro / px - 1) * 100:+.1f}%) {fuente} ",
+        dist = dist_a_r_sup_pct(hi, px)
+        txt_dist = "n/d" if dist is None else f"{dist:+.1f}%"
+        # '\$' literal: dos '$' sin escapar en el mismo texto los interpreta matplotlib como formula (mathtext).
+        ax_p.text(x_lbl, hi, f" N{z.get('nivel', i + 1)}: \\${lo:.2f}-\\${hi:.2f} | {ETIQUETA_DIST_RSUP} {txt_dist} | "
+                             f"{fuente} ",
                   color="#ffffff", fontsize=8.1, fontweight="bold", va="center", ha="left",
                   bbox=dict(boxstyle="round,pad=0.22", facecolor=BG_FIG, edgecolor=c, alpha=0.88), zorder=7)
     ax_p.axhline(px, color="#f0f6fc", linewidth=1.2, alpha=0.85, label=f"Cotizacion actual (${px:.2f})", zorder=5)
@@ -190,5 +222,7 @@ def graficar_niveles(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
                       framealpha=0.9)
     leg.set_zorder(10)
     fig.subplots_adjust(left=0.06, right=0.985, top=0.90, bottom=0.07)
+    fig.text(0.06, 0.012, f"{ETIQUETA_DIST_RSUP}: distancia % del limite GTC (r_sup) al precio actual; negativo = por debajo.",
+             color=MUTED, fontsize=8, ha="left", va="bottom")
     _cerrar(fig, ruta_guardado, mostrar)
     return fig

@@ -72,3 +72,36 @@ def test_perfil_histograma(df_sintetico):
     c, v, paso = charts.perfil_histograma(df_sintetico)
     assert len(c) == len(v) == 70 and paso > 0 and v.sum() > 0
     assert len(charts.perfil_histograma(pd.DataFrame())[0]) == 0
+
+
+def test_trimestres_13f_ignora_gestores_pasivos(df_sintetico):
+    r = _r13f(df_sintetico).iloc[:1].copy()  # un solo gestor que acumula
+    r["pasivo"] = [True]
+    assert charts.trimestres_acumulacion(r, df_sintetico) == []  # Vanguard / State Street no son conviccion
+    assert len(charts.trimestres_acumulacion(r, df_sintetico, solo_activos=False)) == 1
+    r["pasivo"] = [False]
+    assert len(charts.trimestres_acumulacion(r, df_sintetico)) == 1
+    r2 = pd.concat([r, r.assign(gestor="P", pasivo=True, periodo=df_sintetico.index[300].strftime("%Y-%m-%d"))])
+    assert charts.trimestres_acumulacion(r2, df_sintetico) == [df_sintetico.index[200]]  # el trimestre del pasivo no cuenta
+
+
+def test_etiquetas_de_zona_miden_dist_a_r_sup(df_sintetico, zonas):
+    px = float(df_sintetico["Close"].iloc[-1])
+    fig = charts.graficar_niveles(df_sintetico, "TEST", zonas)
+    textos = [t.get_text() for t in fig.axes[0].texts]
+    assert len(textos) == 2
+    for z, t in zip(zonas, textos):
+        assert charts.ETIQUETA_DIST_RSUP in t and f"{(z['r_sup'] / px - 1) * 100:+.1f}%" in t
+    assert any("Limite GTC en r_sup" in e for e in fig.axes[0].get_legend_handles_labels()[1])
+    assert any(charts.ETIQUETA_DIST_RSUP in t.get_text() for t in fig.texts)  # nota al pie del grafico
+
+
+
+def test_etiquetas_de_zona_no_activan_mathtext(df_sintetico, zonas):
+    """Dos '$' sin escapar en un texto de matplotlib se dibujan como formula (se perdian los '$' y el rango salia en cursiva)."""
+    import re
+    fig = charts.graficar_niveles(df_sintetico, "TEST", zonas)
+    for t in fig.axes[0].texts:
+        assert not re.search(r"(?<!\\)\$", t.get_text()), t.get_text()
+        assert t.get_text().count("\\$") == 2  # r_inf y r_sup con '$' literal
+        assert not t._preprocess_math(t.get_text())[1]  # matplotlib no lo trata como mathtext

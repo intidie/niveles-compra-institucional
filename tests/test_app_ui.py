@@ -99,7 +99,7 @@ def test_filas_tabla_con_y_sin_backtest():
     filas = ui_mod.filas_tabla(z, {"bounce": 0.67, "fill_rate": 0.34, "mae60_mediana": -0.084}, 100.0)
     assert filas[0]["nivel"] == "N1" and filas[0]["bounce"] == pytest.approx(67.0)
     assert filas[0]["mae"] == pytest.approx(-8.4) and filas[0]["entrada"] == 95.0
-    assert filas[0]["dist_pct"] == -5.0
+    assert filas[0]["dist_pct"] == pytest.approx(-5.0)  # (r_sup 95 / precio 100 - 1) * 100: siempre contra r_sup
     vacias = ui_mod.filas_tabla(z, {}, 100.0)
     assert vacias[0]["bounce"] is None and vacias[0]["fill_rate"] is None and vacias[0]["mae"] is None
     assert ui_mod.filas_tabla(z, {"bounce": float("nan")}, None)[0]["bounce"] is None
@@ -448,7 +448,7 @@ def test_vista_construye_tabs_ayudas_y_tema_oscuro(cliente):
     assert col.props["dark-page"] == ui_mod.BG_PAGINA and col.props["primary"] == ui_mod.COLORES_QUASAR["primary"]
     assert "color-scheme" in cliente._head_html and ui_mod.BG_POPUP in cliente._head_html
     assert not [e for e in els if isinstance(e, ui.table) and "dark" not in e.props]
-    assert len([e for e in els if isinstance(e, ui.expansion)]) == 7  # pestaña Modelo
+    assert len([e for e in els if isinstance(e, ui.expansion)]) == 8  # pestaña Modelo
 
 
 def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch):
@@ -470,7 +470,7 @@ def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch)
 # =====================================================================================================
 # Pestaña "Modelo": contenido como datos (sin red), fidelidad con el codigo y con docs/METODOLOGIA.md
 # =====================================================================================================
-SECCIONES = ["que_es", "familias", "grafico", "panel", "metricas", "confiabilidad", "limitaciones"]
+SECCIONES = ["que_es", "logica", "familias", "grafico", "panel", "metricas", "confiabilidad", "limitaciones"]
 
 
 def _sec(secciones, id_):
@@ -516,15 +516,19 @@ def test_modelo_secciones_obligatorias_y_estructura():
     ("grafico", ["Velas", "Bandas de colores", "Form 4", "▲", "13F", "◆", "Volume Profile", "naranjas", "doradas",
                  "línea blanca"]),
     ("panel", ["Ticker", "Capital USD", "1000 USD", "3/6", "500,00", "5,2083", "Backtest (lento)", "SEC: Form 4 / 13F",
-               "no se recalculan", "Recalcular", "Necesario", "No necesario"]),
+               "no se recalculan", "Recalcular", "Necesario", "No necesario", "por ticker",
+               "no se reparte entre tickers"]),
     ("metricas", ["Fill Rate", "10 órdenes", "Bounce Rate", "MAE", "compré a 100", "-10 %", "60 / 120 / 252",
-                  "Dist. %", "Acciones", "Precio prom. pond.", "rango primario"]),
+                  "Dist. a r_sup", "Acciones", "Precio prom. pond.", "rango primario", "no son comparables",
+                  "muestra pequeña: N fills", "backtest de 5 años"]),
     ("confiabilidad", ["Cobertura", "se excluye", "reescalan", "Score de ranking", "promedio simple", "Score de confluencia",
-                       "NO", "probabilidad", "cinco componentes"]),
+                       "NO", "probabilidad", "cinco componentes", "no es un cero ni un valor neutro", "sin dato",
+                       "solo cuentan los gestores activos", "no respondieron", "cobertura distinta"]),
     ("limitaciones", ["No es asesoría financiera", "NO es una probabilidad", "poder predictivo", "Spearman",
                       "casi idéntica a la línea base", "MAE es sistemáticamente peor", "se repiten en todas las filas",
                       "rango primario", "Sesgo de la muestra", "supervivencia", "no coinciden mejor que el azar",
-                      "point-in-time", "costos de transacción"]),
+                      "point-in-time", "costos de transacción", "ayuda de organización, no una señal", "domina",
+                      "no respalda que más familias", "muestra pequeña: N fills"]),
 ])
 def test_modelo_contenido_obligatorio_por_seccion(id_, claves):
     txt = _txt(id_)
@@ -538,7 +542,7 @@ def test_modelo_aviso_no_es_asesoria_visible_en_la_capa_de_render(cliente):
     els = list(cliente.elements.values())
     exp = [e for e in els if isinstance(e, ui.expansion)]
     assert [e.props["data-seccion"] for e in exp] == SECCIONES
-    assert [e.props["model-value"] for e in exp] == [True, False, False, False, False, False, True]
+    assert [e.props["model-value"] for e in exp] == [True, True, False, False, False, False, False, True]
     md = " ".join(str(getattr(e, "content", "")) for e in els if isinstance(e, ui.markdown))
     assert "No es asesoría financiera" in md and md.count("No es asesoría financiera") >= 2  # arriba y en Limitaciones
     assert any(isinstance(e, ui.card) and "aviso-card" in e._classes for e in els)  # cuadro de aviso fuera de las expansiones
@@ -720,3 +724,330 @@ def test_modelo_texto_markdown_sin_enfasis_accidentales():
                 md = ui_mod._md_tabla(b["tabla"])
                 assert md.count("\n") == len(b["tabla"]["filas"]) + 1
                 assert "<em>" not in markdown2.markdown(md, extras=["tables"]), s["id"]
+
+
+# =====================================================================================================
+# Correcciones del auditor: cobertura / datos no disponibles, avisos, distancia a r_sup, capital por ticker,
+# ticker inicial coherente y pestaña Modelo actualizada (todo sin red)
+# =====================================================================================================
+def _res_con_avisos(df=None, zonas=None):
+    res = _res_sintetico(df, zonas if zonas is not None else _zonas_ricas())
+    res.update(
+        confiabilidad={"indice": 41.2, "cobertura": 0.65,
+                       "detalle": {"absorcion": {"valor": 26.0, "peso_efectivo": 0.5},
+                                   "backtest": {"valor": 60.0, "peso_efectivo": 0.3},
+                                   "confluencia": {"valor": 40.0, "peso_efectivo": 0.2}}},
+        componentes_sin_dato=["respaldo_13f_form4", "stock_act"],
+        avisos=["muestra pequeña: 4 fills (< 10); Bounce, Fill rate y MAE del backtest no son concluyentes",
+                "13f: no respondieron: Bridgewater, State Street",
+                "STOCK Act no disponible: sin red (excluido de la confiabilidad; no cuenta como neutro)"],
+        n_fills=4, n_ordenes=11, anios_backtest=5)
+    return res
+
+
+def _textos_avisos(v):
+    return [e.text for e in v.avisos.default_slot.children if hasattr(e, "text")]
+
+
+def test_resumen_tarjetas_cobertura_sin_dato_y_avisos_nuevos():
+    res = _res_con_avisos()
+    z = ui_mod.filtrar_zonas(res["zonas"], _todas(), [], 1000.0)
+    d = ui_mod.resumen_tarjetas(res, z)
+    assert d["cobertura"] == 0.65
+    assert d["sin_dato"] == ["Respaldo 13F / Form 4", "STOCK Act (Congreso)"]  # excluidos, con su etiqueta legible
+    assert any("muestra pequeña: 4 fills" in a for a in d["avisos"])
+    assert any("13f: no respondieron: Bridgewater" in a for a in d["avisos"])
+    assert any("STOCK Act no disponible" in a for a in d["avisos"])
+    assert d["avisos_datos"] == res["avisos"]
+    assert d["errores"] == []  # no son errores de etapa: se muestran como avisos
+
+
+def test_sin_dato_se_deriva_de_detalle_si_falta_la_lista():
+    res = _res_con_avisos()
+    del res["componentes_sin_dato"]
+    assert set(ui_mod.nombres_sin_dato(res)) == {"Respaldo 13F / Form 4", "STOCK Act (Congreso)"}
+    assert ui_mod.nombres_sin_dato(_res_sintetico(None, [])) == []  # sin 'detalle' no se afirma nada
+
+
+def test_texto_alcance_backtest_rango_primario_anios_y_fills():
+    t = ui_mod.texto_alcance_backtest(_res_con_avisos())
+    assert "rango primario (N1)" in t and "backtest de 5 años" in t and "4 fills de 11 órdenes" in t
+    assert "no comparable con el pool" in t and "r_sup" in t
+    assert "Sin backtest" in ui_mod.texto_alcance_backtest({})
+
+
+def test_distancia_unica_a_r_sup_en_tabla_ranking_y_figura(df_sintetico):
+    """tabla, ranking y etiqueta del grafico miden la distancia al MISMO punto: r_sup (nunca al centro)."""
+    zonas = ui_mod.filtrar_zonas(_zonas_ricas(), _todas(), [], 1000.0)
+    px = 100.0
+    esperado = [(z["r_sup"] / px - 1) * 100 for z in zonas]
+    assert [f["dist_pct"] for f in ui_mod.filas_tabla(zonas, None, px)] == pytest.approx(esperado)
+    rk = ui_mod.filas_ranking([{"ticker": "A", "precio_actual": px, "zonas": zonas, "score_ranking": 1.0}])[0][0]
+    assert rk["dist_pct"] == pytest.approx(esperado[0])
+    fig = ui_mod.construir_figura(df_sintetico, "TEST", zonas, px)
+    etiquetas = [a.text for a in fig.layout.annotations if a.text.startswith("N")]
+    assert len(etiquetas) == 3
+    for z, e in zip(zonas, etiquetas):
+        assert ui_mod.ETIQUETA_DIST_RSUP in e and f"{(z['r_sup'] / px - 1) * 100:+.1f}%" in e
+        centro = (z["r_inf"] + z["r_sup"]) / 2
+        assert f"{(centro / px - 1) * 100:+.1f}%" not in e  # N1: centro -7.5 %, r_sup -5.0 %
+
+
+def test_filas_ranking_cobertura_y_sin_dato():
+    def r(t, score, cob, sin):
+        return {"ticker": t, "precio_actual": 10.0, "score_ranking": score, "confluencia_score": score,
+                "confiabilidad": {"indice": score, "cobertura": cob}, "componentes_sin_dato": sin,
+                "zonas": [{"r_inf": 1.0, "r_sup": 2.0}]}
+    filas, _ = ui_mod.filas_ranking([r("A", 80.0, 1.0, []), r("B", 60.0, 0.65, ["stock_act", "backtest"]),
+                                     r("C", 50.0, None, [])])
+    por = {f["ticker"]: f for f in filas}
+    assert por["A"]["cobertura"] == pytest.approx(100.0) and por["A"]["sin_dato"] == ""
+    assert por["B"]["cobertura"] == pytest.approx(65.0) and por["B"]["sin_dato"] == "STOCK Act (Congreso), Backtest"
+    assert por["C"]["cobertura"] is None
+    assert ui_mod.coberturas_distintas(filas) is True
+    assert ui_mod.coberturas_distintas(filas[:1]) is False
+    assert ui_mod.coberturas_distintas([{"cobertura": 65.0}, {"cobertura": 65.2}]) is False
+
+
+def test_nota_ranking_calcula_el_peso_de_la_confluencia_al_vuelo(monkeypatch):
+    from src.validation import scoring
+    assert f"≈{ui_mod._es(ui_mod.nucleo.peso_confluencia_ranking() * 100, 1)} %" in ui_mod.nota_ranking()
+    monkeypatch.setattr(scoring, "cargar_pesos", lambda: {"confluencia": 0.30})
+    assert "≈65,0 %" in ui_mod.nota_ranking()  # 0.5 + 0.5 * 0.30
+    assert "no una señal" in ui_mod.nota_ranking() and "no son comparables" in ui_mod.nota_ranking()
+
+
+def test_vista_ticker_inicial_coincide_con_el_select(cliente):
+    v = ui_mod.Vista()
+    v.construir()
+    esperado = ui_mod.validar_ticker(v.watchlist[0]) if v.watchlist else None
+    assert v.ticker == esperado and v.sel_ticker.value == esperado  # lo que se ve es lo que se recalcula
+
+
+def test_vista_muestra_el_resultado_cacheado_del_ticker_inicial(cliente, df_sintetico, monkeypatch):
+    monkeypatch.setattr(ui_mod, "cargar_watchlist", lambda *a, **k: ["TEST", "AAA"])
+    monkeypatch.setitem(ui_mod.CACHE, "TEST", _res_con_avisos(df_sintetico))
+    v = ui_mod.Vista()
+    v.construir()  # sin tocar el select: antes self.ticker era None y la pagina mostraba "n/d" con TEST seleccionado
+    assert v.ticker == "TEST" and v.tarj["precio"].text == "$100.00"
+
+
+def test_vista_sin_cache_invita_a_recalcular_el_ticker_mostrado(cliente, monkeypatch):
+    monkeypatch.setattr(ui_mod, "cargar_watchlist", lambda *a, **k: ["ZZZ"])
+    monkeypatch.delitem(ui_mod.CACHE, "ZZZ", raising=False)
+    v = ui_mod.Vista()
+    v.construir()
+    assert any("ZZZ" in t and "Recalcular" in t for t in _textos_avisos(v))
+    monkeypatch.setattr(ui_mod, "cargar_watchlist", lambda *a, **k: [])
+    v2 = ui_mod.Vista()
+    v2.construir()
+    assert v2.ticker is None and v2.sel_ticker.value is None
+
+
+def test_vista_tarjeta_confiabilidad_muestra_cobertura_y_excluidos(cliente, df_sintetico, monkeypatch):
+    monkeypatch.setitem(ui_mod.CACHE, "TEST", _res_con_avisos(df_sintetico))
+    v = ui_mod.Vista()
+    v.construir()
+    v.ticker = "TEST"
+    v.refrescar()
+    assert v.tarj_cob.text == "cobertura 65 %"
+    assert v.tarj_excl.text == "sin dato: Respaldo 13F / Form 4, STOCK Act (Congreso)"
+    textos = _textos_avisos(v)
+    assert any("muestra pequeña: 4 fills" in t for t in textos)
+    assert any("13f: no respondieron" in t for t in textos) and any("STOCK Act no disponible" in t for t in textos)
+    assert "rango primario (N1)" in v.lbl_bt.text and "5 años" in v.lbl_bt.text
+    v.ticker = None
+    v.refrescar()
+    assert v.tarj_excl.text == ""
+
+
+def test_vista_watchlist_nota_de_capital_cobertura_y_distancia(cliente):
+    from nicegui import ui
+    v = ui_mod.Vista()
+    v.construir()
+    textos = [e.text for e in cliente.elements.values() if isinstance(e, ui.label)]
+    assert ui_mod.nucleo.NOTA_CAPITAL_BATCH in textos and ui_mod.nota_ranking() in textos
+    assert "no se reparte entre tickers" in v.nota_capital.text
+    cols = {c["name"]: c["label"] for c in v.tabla_wl.columns}
+    assert "cobertura" in cols and cols["dist_pct"] == "Dist. a r_sup %"
+    assert {c["name"]: c["label"] for c in v.tabla.columns}["dist_pct"] == "Dist. a r_sup %"
+    assert "q-tooltip" in v.tabla_wl.slots["body-cell-cobertura"].template  # tooltip con los componentes sin dato
+
+
+def test_ayuda_capital_dice_por_ticker():
+    assert "POR TICKER" in ui_mod.AYUDAS["capital"] and "no se reparte entre tickers" in ui_mod.AYUDAS["capital"]
+
+
+def test_modelo_gestores_13f_se_leen_del_codigo(monkeypatch):
+    from src.data import sec_edgar
+    monkeypatch.setattr(sec_edgar, "GESTORES_13F", {"Fondo Alfa": 1, "Fondo Beta": 2, "Indexa": 3})
+    monkeypatch.setattr(sec_edgar, "GESTORES_PASIVOS", frozenset({"Indexa"}))
+    assert ui_mod.gestores_13f() == {"activos": ["Fondo Alfa", "Fondo Beta"], "pasivos": ["Indexa"]}
+    t = _txt("confiabilidad")
+    assert "Fondo Alfa, Fondo Beta" in t and "Indexa" in t and "consulta 3 gestores" in t
+    assert "Bridgewater" not in t  # nada hardcodeado
+
+
+def test_modelo_gestores_reales_activos_y_pasivos():
+    from src.data import sec_edgar
+    g = ui_mod.gestores_13f()
+    assert set(g["activos"]) | set(g["pasivos"]) == set(sec_edgar.GESTORES_13F)
+    assert set(g["pasivos"]) == set(sec_edgar.GESTORES_PASIVOS) & set(sec_edgar.GESTORES_13F)
+    t = _txt("confiabilidad")
+    assert all(n in t for n in sec_edgar.GESTORES_13F)
+
+
+def test_modelo_ranking_dominado_por_confluencia_se_calcula_al_renderizar(monkeypatch):
+    from src.validation import scoring
+    real = scoring.cargar_pesos()
+    esperado = f"≈{ui_mod._es((0.5 + 0.5 * real['confluencia']) * 100, 1)} %"
+    lim = _txt("limitaciones")
+    assert esperado in lim and "ayuda de organización, no una señal" in lim
+    assert "no respalda que más familias coincidiendo mejoren el retorno" in lim
+    monkeypatch.setattr(scoring, "cargar_pesos", lambda: {**real, "confluencia": 0.30})
+    assert "≈65,0 %" in _txt("limitaciones")
+
+
+def test_modelo_muestra_pequena_usa_la_constante_del_codigo(monkeypatch):
+    monkeypatch.setattr(ui_mod.nucleo, "MIN_FILLS_AVISO", 25)
+    assert "menos de 25 ejecuciones simuladas" in _txt("limitaciones")
+    assert "menos de 25 ejecuciones simuladas" in _txt("metricas")
+
+
+def test_modelo_normalizacion_13f_dice_activos_y_exclusion():
+    norm = ui_mod.normalizacion_componentes(ui_mod._parametros())
+    assert "ACTIVOS" in norm["respaldo_13f_form4"] and "se excluye" in norm["respaldo_13f_form4"]
+    assert "no vale 0" in norm["stock_act"]
+
+
+def test_modelo_ventana_de_absorcion_son_velas_contando_la_del_toque():
+    """El backtest mira range(k, k + VENTANA_ABS + 1): la vela del toque y las VENTANA_ABS siguientes."""
+    from src.validation import backtest_ranges as br
+    n = 30
+
+    def hay_absorcion(j):  # vela de rechazo (tercio superior, volumen 5x la media) en la rueda j; el toque es la rueda 1
+        h = _ohlc(n, {(j, "Low"): 99.0, (j, "High"): 101.0, (j, "Close"): 100.8, (j, "Volume"): 5e6})
+        return br.evaluar_orden(h, 0, 96.0, 100.0, np.full(n, 1e6))["absorcion"]
+    k = 1
+    assert hay_absorcion(k) and hay_absorcion(k + br.VENTANA_ABS) and not hay_absorcion(k + br.VENTANA_ABS + 1)
+    velas = f"{br.VENTANA_ABS + 1} velas"
+    norm = ui_mod.normalizacion_componentes(ui_mod._parametros())["absorcion"]
+    assert velas in norm and "la del toque" in norm and f"{br.VENTANA_ABS} ruedas desde el toque" not in norm
+    lim = _txt("limitaciones")
+    assert velas in lim and "la del toque" in lim and f"({br.VENTANA_ABS} ruedas)" not in lim
+
+
+def test_modelo_valoracion_no_consultada_se_excluye_y_consultada_sin_anclas_vale_cero():
+    conf = _txt("familias")
+    assert "se consultó y ninguna ancla cae en la zona" in conf and "vale 0" in conf
+    assert "no se pudo consultar" in conf and "se excluye" in conf and "reescala" in conf
+    norm = ui_mod.normalizacion_componentes(ui_mod._parametros())["confluencia"]
+    assert "no se pudo consultar" in norm and "se excluye" in norm and "vale 0" in norm
+    assert "valoración sin consultar" in _txt("confiabilidad") and "ninguna ancla de valoración en la zona" in _txt("confiabilidad")
+
+
+def test_modelo_13f_sin_gestor_activo_cuenta_como_no_disponible():
+    t = _txt("confiabilidad")
+    assert "no respondió ningún gestor activo" in t and "aunque sí respondan los pasivos" in t
+
+
+# ---- Seccion "La logica detras: como y por que (en simple)" ---------------------------------------------------
+def _logica():
+    return _sec(ui_mod.contenido_modelo(), "logica")
+
+
+def test_logica_existe_visible_y_justo_despues_de_la_seccion_1():
+    secs = ui_mod.contenido_modelo()
+    assert [s["id"] for s in secs][:2] == ["que_es", "logica"]
+    s = _logica()
+    assert s["abierta"] and s["titulo"].startswith("2. La lógica detrás") and "en simple" in s["titulo"]
+    txt = ui_mod.texto_seccion(s)
+    for c in ["La idea central", "Analogía", "paso a paso", "De dónde salen los datos", "Por qué debería funcionar",
+              "Lo demostrado", "Limitaciones, en corto", "Material educativo; no es asesoría financiera"]:
+        assert c.lower() in txt.lower(), c
+    assert s["parrafos"][-1] == {"aviso": "Material educativo; no es asesoría financiera."}
+
+
+def test_logica_menciona_cada_api_real_y_libreria():
+    txt = ui_mod.texto_seccion(_logica())
+    for c in ["yfinance", "SEC EDGAR", "edgartools", "13F-HR", "Form 4", "código P", "10-K", "10-Q", "STOCK Act",
+              "kadoa-org/congress-trading-monitor", "smartmoneyconcepts", "45 días", "2 días hábiles", "24 horas",
+              "dato no disponible"]:
+        assert c in txt, c
+
+
+def test_logica_funciones_citadas_existen_y_estan_en_el_texto():
+    import importlib
+    txt = ui_mod.texto_seccion(_logica())
+    assert ui_mod.FUNCIONES_CITADAS
+    for mod, fn in ui_mod.FUNCIONES_CITADAS:
+        assert callable(getattr(importlib.import_module(mod), fn)), (mod, fn)
+        assert fn in txt, fn
+    for fn in ("obtener_13f_ticker", "compras_insiders"):
+        assert fn in txt
+    from src.data import stock_act
+    assert stock_act.REPO_URL.endswith("kadoa-org/congress-trading-monitor")
+
+
+def test_logica_apis_reales_declaradas_en_requirements():
+    import pathlib
+    req = (pathlib.Path(ui_mod.__file__).parent / "requirements.txt").read_text(encoding="utf-8-sig").lower()
+    for lib in ("yfinance", "edgartools", "smartmoneyconcepts"):
+        assert lib in req
+
+
+def test_logica_sin_promesas_de_rentabilidad():
+    txt = ui_mod.texto_seccion(_logica()).lower()
+    for prohibido in ["rentabilidad garantizada", "ganancia garantizada", "garantiza", "sí funciona", "si funciona",
+                      "siempre rebota", "seguro que sube", "retorno asegurado"]:
+        assert prohibido not in txt, prohibido
+    assert "no se puede afirmar" in txt and "no discrimina" in txt
+
+
+def test_logica_incluye_evidencia_negativa_con_cifras_de_metodologia():
+    txt = ui_mod.texto_seccion(_logica())
+    for k in ("spearman_bounce", "spearman_ret60", "mediana252_fill", "mediana252_base", "mae60_mediana", "mae60_base",
+              "solape_rodante", "solape_control", "n_trimestres_13f"):
+        assert ui_mod._c(k) in txt, k
+    for c in ["no discrimina resultados", "MAE es peor", "no coinciden mejor que el azar", "sesgo de supervivencia",
+              "no se probaron", "muestra es muy pequeña"]:
+        assert c.lower() in txt.lower(), c
+    for c in ["disciplina", "escalonadas", "trazabilidad", "cierre intradía"]:
+        assert c in txt
+
+
+def test_logica_ejemplo_semiconductores_marcado_como_ilustrativo():
+    s = _logica()
+    txt = ui_mod.texto_seccion(s)
+    assert "ILUSTRATIVO, NO REAL" in txt and "inventad" in txt and "NVDA" in txt
+    assert "cíclico" in txt and "volátil" in txt and "MAE" in txt and "escalonamiento" in txt
+    assert "ciclo del sector" in txt
+    ej = ui_mod.EJ_SEMI
+    assert f"{ui_mod._es(ej['precio'], 0)} USD" in txt and "(inventado)" in txt
+    # el bloque que introduce las cifras precede a las cifras
+    i_marca = txt.index("ILUSTRATIVO, NO REAL")
+    assert i_marca < txt.index(f"{ui_mod._es(ej['precio'], 0)} USD")
+
+
+def test_logica_gestores_y_parametros_se_leen_del_codigo(monkeypatch):
+    from src.data import sec_edgar
+    monkeypatch.setattr(sec_edgar, "GESTORES_13F", {"Fondo Ficticio A": 1, "Vanguard Group": 2})
+    txt = ui_mod.texto_seccion(_logica_nueva())
+    assert "Fondo Ficticio A" in txt and "Berkshire" not in txt
+    from src.validation import backtest_ranges as br
+    monkeypatch.setattr(br, "VIDA_ORDEN", 77)
+    assert "77 ruedas" in ui_mod.texto_seccion(_logica_nueva())
+
+
+def _logica_nueva():
+    return _sec(ui_mod.contenido_modelo(), "logica")
+
+
+def test_logica_se_renderiza_en_su_expansion(cliente):
+    from nicegui import ui
+    ui_mod.renderizar_modelo(ui_mod.contenido_modelo())
+    els = list(cliente.elements.values())
+    exp = next(e for e in els if isinstance(e, ui.expansion) and e.props.get("data-seccion") == "logica")
+    assert exp.props["model-value"] is True
+    md = " ".join(str(getattr(e, "content", "")) for e in els if isinstance(e, ui.markdown))
+    assert "Material educativo; no es asesoría financiera" in md

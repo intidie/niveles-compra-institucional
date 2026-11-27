@@ -2,6 +2,7 @@
 import glob
 import io
 import json
+import logging
 import os
 import shutil
 import time
@@ -12,9 +13,21 @@ REPO_URL = "https://github.com/kadoa-org/congress-trading-monitor"
 ZIP_URL = REPO_URL + "/archive/refs/heads/main.zip"
 REPO_DIR_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cache", "congress-trading-monitor")
 
+logger = logging.getLogger(__name__)
 
-def _neutro(resumen):
-    return {"pts": 7.5, "compras": 0, "ventas": 0, "resumen": resumen, "ultimas_tx": []}
+
+def _no_disponible(motivo):
+    """Resultado cuando NO se pudo consultar el flujo del Congreso (fallo o datos ilegibles).
+
+    ``pts=None`` y ``disponible=False``: el consumidor debe excluir el componente (no es 0 ni un valor neutro).
+    """
+    return {"pts": None, "disponible": False, "motivo": motivo, "compras": 0, "ventas": 0,
+            "resumen": f"Flujo Congreso (STOCK Act): No disponible ({motivo})", "ultimas_tx": []}
+
+
+def _resumir_error(exc, maxlen=100):
+    msg = " ".join(str(exc).split())
+    return (f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__)[:maxlen]
 
 
 # Nombres de dispositivo reservados en Windows (p. ej. ticker/CON.json no se puede crear).
@@ -50,17 +63,43 @@ def sincronizar_repo(repo_dir=REPO_DIR_DEFAULT, max_edad_horas=24):
 
 
 def consultar_flujo_congreso_stock_act(ticker_symbol, repo_dir=REPO_DIR_DEFAULT):
-    ticker_obj = ticker_symbol.strip().upper()
+    """
+    Flujo de compras/ventas de miembros del Congreso (STOCK Act) para `ticker_symbol`.
+
+    Devuelve SIEMPRE un dict con las claves: ``pts`` (0-15 o None), ``disponible`` (bool), ``motivo``
+    (str si ``disponible=False``, None si True), ``compras``, ``ventas``, ``resumen`` (str) y
+    ``ultimas_tx`` (lista de hasta 4 dicts). Nunca lanza.
+
+    * Con datos y operaciones: ``disponible=True``, ``pts = 15 * fraccion de compras`` entre las 15 ultimas.
+    * Consultado correctamente y SIN operaciones del ticker: ``disponible=True``, ``pts=0.0`` (cero real).
+    * No se pudo consultar (fallo de descarga, carpeta ausente, JSON ilegibles o esquema irreconocible):
+      ``disponible=False``, ``pts=None`` y ``motivo``. No es 0 ni un valor neutro: el consumidor debe
+      excluir el componente (no contarlo como cobertura).
+    """
+    ticker_obj = str(ticker_symbol or "").strip().upper()
+    if not ticker_obj:
+        return _no_disponible("ticker vacio")
     try:
         sincronizar_repo(repo_dir)
-    except Exception as e:
-        return _neutro(f"Flujo Congreso (STOCK Act): No disponible ({e})")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("STOCK Act: no se pudo sincronizar el repositorio (%s)", _resumir_error(e))
+        return _no_disponible(f"no se pudo sincronizar el repositorio ({_resumir_error(e)})")
 
     data_dir = os.path.join(repo_dir, "public", "data")
     if not os.path.exists(data_dir):
-        return _neutro("Flujo Congreso (STOCK Act): Carpeta public/data no encontrada")
+        return _no_disponible("carpeta public/data no encontrada")
 
+    try:
+        return _evaluar_flujo(ticker_obj, data_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("STOCK Act: error inesperado procesando %s (%s)", ticker_obj, _resumir_error(e))
+        return _no_disponible(f"error procesando datos ({_resumir_error(e)})")
+
+
+def _evaluar_flujo(ticker_obj, data_dir):
+    """Lee los JSON de `data_dir` y arma el resultado (ver ``consultar_flujo_congreso_stock_act``)."""
     operaciones = []
+    archivos_ok, ilegibles, registros_vistos = 0, 0, 0
     for ruta in glob.glob(os.path.join(data_dir, "**", "*.json"), recursive=True):
         nombre = os.path.basename(ruta).lower()
         if any(s in nombre for s in ("meta", "manifest", "schema")):
@@ -68,8 +107,11 @@ def consultar_flujo_congreso_stock_act(ticker_symbol, repo_dir=REPO_DIR_DEFAULT)
         try:
             with open(ruta, "r", encoding="utf-8") as f:
                 contenido = json.load(f)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            ilegibles += 1
+            logger.warning("STOCK Act: JSON ilegible %s (%s)", os.path.basename(ruta), _resumir_error(e))
             continue
+        archivos_ok += 1
 
         registros = []
         if isinstance(contenido, list):
@@ -87,6 +129,8 @@ def consultar_flujo_congreso_stock_act(ticker_symbol, repo_dir=REPO_DIR_DEFAULT)
                 continue
             tk = str(reg.get("ticker") or reg.get("symbol") or reg.get("asset_ticker")
                      or reg.get("stock") or "").strip().upper()
+            if tk:
+                registros_vistos += 1
             if tk != ticker_obj:
                 continue
             tipo = str(reg.get("type") or reg.get("tx_type") or reg.get("transaction")
@@ -117,13 +161,24 @@ def consultar_flujo_congreso_stock_act(ticker_symbol, repo_dir=REPO_DIR_DEFAULT)
 
     compras = sum(1 for o in unicas if o["lado"] == "COMPRA")
     ventas = sum(1 for o in unicas if o["lado"] == "VENTA")
+    if archivos_ok == 0:
+        return _no_disponible("ningun archivo JSON legible en public/data")
+    if registros_vistos == 0:
+        return _no_disponible("ningun registro con ticker reconocible (esquema del repositorio distinto al esperado)")
     if compras + ventas == 0:
-        return _neutro("Flujo Congreso (STOCK Act): Sin operaciones registradas para este ticker (Neutral)")
+        if ilegibles:
+            # Sin evidencia de operaciones, pero parte de la fuente no se pudo leer: no se afirma "cero".
+            return _no_disponible(f"{ilegibles} archivo(s) JSON ilegible(s) y sin operaciones en el resto")
+        return {"pts": 0.0, "disponible": True, "motivo": None, "compras": 0, "ventas": 0,
+                "resumen": "Flujo Congreso (STOCK Act): Sin operaciones registradas para este ticker (consultado; 0 pts)",
+                "ultimas_tx": []}
 
     recientes = unicas[:15]
     ratio = sum(1 for o in recientes if o["lado"] == "COMPRA") / len(recientes)
     return {
         "pts": round(ratio * 15.0, 1),
+        "disponible": True,
+        "motivo": None,
         "compras": compras,
         "ventas": ventas,
         "resumen": (f"Flujo Congreso (STOCK Act): {compras} Compras vs {ventas} Ventas totales "

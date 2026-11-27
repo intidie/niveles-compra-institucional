@@ -15,6 +15,16 @@ w ~ prior * exp(0.5 * clip(z, -3, 3)), donde z es el estadistico t (o z) del efe
 retorno a 60 ruedas / coincidencia 13F (``backtest_ranges`` y ``case_studies``). Evidencia negativa reduce el
 peso relativo y positiva lo aumenta. Componentes sin muestra (STOCK Act) usan z = 0 (conservan su a-priori). Resultado en ``pesos_calibrados.json``.
 Ejecutar:  python -m src.validation.scoring   (requiere haber corrido backtest_ranges y case_studies).
+
+Datos no disponibles != 0
+-------------------------
+Un dato que NO se pudo obtener (consulta fallida, sin respuesta) es ``None`` y se EXCLUYE: el componente (o la mitad
+del componente) desaparece del promedio y los pesos restantes se renormalizan, de modo que la ``cobertura`` baja en
+lugar de inflarse con ceros o con valores neutros. Un dato obtenido que vale cero (0 USD de compras de insiders,
+0 gestores con posicion, 0 puntos STOCK Act, 0 anclas de valoracion en la zona) SI es dato y puntua cero. La
+valoracion no consultada (``n_valoracion=None``) excluye solo la mitad de valoracion de ``s_confluencia`` y reescala
+la de familias. Excepcion residual documentada en
+``s_backtest``: si hay bounce pero faltan los medianos de retorno o MAE a 60 ruedas, se usan 0 (retorno) y 0.5 (MAE neutro).
 """
 from __future__ import annotations
 
@@ -37,8 +47,10 @@ MEZCLA_EMPIRICA = 0.5
 
 
 def cargar_pesos() -> dict:
+    """Pesos calibrados de ``pesos_calibrados.json``; si el fichero no existe o es ilegible, los a-priori."""
     try:
-        return json.load(open(RUTA_PESOS, encoding="utf-8"))["pesos"]
+        with open(RUTA_PESOS, encoding="utf-8") as f:
+            return json.load(f)["pesos"]
     except Exception:  # noqa: BLE001
         return dict(PESOS_PRIOR)
 
@@ -48,17 +60,44 @@ def _clip01(x):
     return float(min(1.0, max(0.0, x)))
 
 
+def _hay_dato(x) -> bool:
+    """True si ``x`` es un dato utilizable: no es None ni NaN (cero SI es un dato valido)."""
+    try:
+        return not bool(pd.isna(x))
+    except (TypeError, ValueError):  # no escalar: se deja pasar y la normalizacion posterior falla de forma visible
+        return True
+
+
 def s_13f(n_acumulando: int | None, n_con_posicion: int | None, compras_form4_usd: float | None = None):
-    """50 % fraccion de gestores con posicion que aumentaron + 50 % compras Form 4 (saturan en USD 1 M)."""
-    if n_con_posicion is None and compras_form4_usd is None:
+    """Componente 13F/Form 4 (0-100): promedio 50/50 de las mitades DISPONIBLES.
+
+    * Mitad gestores: fraccion de gestores ACTIVOS con posicion que aumentaron (``n_acumulando / n_con_posicion``,
+      acotada a [0, 1]). Disponible si ``n_con_posicion`` no es None; ``n_con_posicion == 0`` es el dato valido
+      "0 gestores con posicion" (fraccion 0). Si ``n_con_posicion > 0`` pero ``n_acumulando`` es None no se puede
+      calcular la fraccion y la mitad se trata como no disponible.
+    * Mitad Form 4: compras de insiders (codigo P) en USD, saturadas en 1 M USD. Disponible si
+      ``compras_form4_usd`` no es None (0.0 = "consulta correcta, sin compras" = dato valido).
+
+    Una mitad no disponible (None/NaN) se EXCLUYE y el score es el promedio de las disponibles, reponderado: con una
+    sola disponible esta vale el 100 % del componente (no el 50 %). Sin ninguna mitad disponible devuelve None
+    (el componente se excluye del indice y los pesos se renormalizan).
+    """
+    mitades = []
+    if _hay_dato(n_con_posicion):
+        if n_con_posicion <= 0:
+            mitades.append(0.0)
+        elif _hay_dato(n_acumulando):
+            mitades.append(_clip01(n_acumulando / n_con_posicion))
+    if _hay_dato(compras_form4_usd):
+        mitades.append(_clip01(compras_form4_usd / 1_000_000))
+    if not mitades:
         return None
-    frac = (n_acumulando or 0) / n_con_posicion if n_con_posicion else 0.0
-    f4 = _clip01((compras_form4_usd or 0.0) / 1_000_000)
-    return 100 * (0.5 * frac + 0.5 * f4)
+    return 100 * sum(mitades) / len(mitades)
 
 
 def s_stock_act(pts: float | None):
-    return None if pts is None else 100 * _clip01(pts / 15.0)
+    """``pts`` (0-15) de STOCK Act a 0-100. None/NaN (consulta fallida) -> None: el componente se excluye."""
+    return 100 * _clip01(pts / 15.0) if _hay_dato(pts) else None
 
 
 def s_absorcion(tasa: float | None):
@@ -66,7 +105,10 @@ def s_absorcion(tasa: float | None):
 
 
 def s_backtest(bounce, ret60_mediana, mae60_mediana):
-    """50 % bounce, 30 % retorno mediano 60d (satura en +15 %), 20 % control de MAE (0 % = 1, -25 % = 0)."""
+    """50 % bounce, 30 % retorno mediano 60d (satura en +15 %), 20 % control de MAE (0 % = 1, -25 % = 0).
+
+    Sin bounce (None/NaN) el componente se excluye (None). Excepcion residual: con bounce pero sin retorno mediano
+    se usa 0 para esa parte, y sin MAE mediano se usa 0.5 (neutro)."""
     if bounce is None or np.isnan(bounce):
         return None
     r = 0.0 if ret60_mediana is None or np.isnan(ret60_mediana) else _clip01(ret60_mediana / 0.15)
@@ -74,34 +116,76 @@ def s_backtest(bounce, ret60_mediana, mae60_mediana):
     return 100 * (0.5 * _clip01(bounce) + 0.3 * r + 0.2 * m)
 
 
-def s_confluencia(n_familias: int | None, n_valoracion: int = 0):
-    if n_familias is None:
+def s_confluencia(n_familias: int | None, n_valoracion: int | None = 0):
+    """Confluencia (0-100): 60 % familias de ancla de la zona + 40 % anclas de valoracion en la zona.
+
+    Con valoracion consultada (``n_valoracion`` entero, incluido 0):
+        ``100 * clip01(0.6 * (n_familias - 1) / 3 + 0.4 * min(1, n_valoracion / 2))``
+    (1 familia aporta 0; 4 familias dan el maximo de la parte de familias; 2 o mas anclas de valoracion dan el maximo de
+    la parte de valoracion). ``n_valoracion = 0`` es un dato valido: "se consulto y no hay anclas en la zona".
+
+    Con ``n_valoracion`` None/NaN (valoracion NO consultada, p. ej. fallo de ``calcular_pisos_valoracion``) la mitad
+    de valoracion se EXCLUYE y la parte de familias se reescala a 0-100 (se divide por su peso 0.6):
+        ``100 * clip01((n_familias - 1) / 3)``      (4 o mas familias -> 100; 1 familia -> 0)
+    ``n_familias`` None/NaN -> None (sin zona no hay confluencia).
+    """
+    if not _hay_dato(n_familias):
         return None
-    return 100 * _clip01(0.6 * (n_familias - 1) / 3 + 0.4 * min(1, n_valoracion / 2))
+    familias = (n_familias - 1) / 3
+    if not _hay_dato(n_valoracion):
+        return 100 * _clip01(familias)
+    return 100 * _clip01(0.6 * familias + 0.4 * min(1, n_valoracion / 2))
 
 
 def calcular_indice_confiabilidad(comp: dict, pesos: dict | None = None) -> dict:
-    """``comp``: {componente: valor 0-100 o None}. Los None se excluyen y los pesos se renormalizan."""
+    """Indice de confiabilidad 0-100 como promedio ponderado de los componentes CON dato.
+
+    ``comp``: {componente: valor 0-100 o None}. Los None/NaN (dato no disponible) y las claves sin peso se excluyen;
+    los pesos de los componentes restantes se renormalizan para sumar 1. Un valor 0 es un dato y SI entra.
+
+    Devuelve un dict con:
+    * ``indice``: float 0-100, o None si ningun componente tiene dato.
+    * ``cobertura``: float en [0, 1] = (suma de los pesos de los componentes con dato) / (suma de todos los pesos).
+      1.0 = los 5 componentes presentes; baja cuando falta alguno (sin STOCK Act: 1 - peso de stock_act). Mide
+      cuanta parte del modelo tuvo dato, no la calidad de esos datos. Con cobertura baja el indice es el promedio de lo
+      poco que hay y no es comparable con el de otro ticker con cobertura distinta.
+    * ``detalle``: {componente_con_dato: {"valor", "peso_efectivo"}}; ``peso_efectivo`` = peso / suma de pesos con
+      dato (suma 1 sobre los presentes).
+    Si ninguno tiene dato: ``{"indice": None, "cobertura": 0.0, "detalle": {}}``.
+    """
     pesos = pesos or cargar_pesos()
-    disp = {k: v for k, v in comp.items() if v is not None and k in pesos}
-    if not disp:
-        return {"indice": None, "cobertura": 0.0, "detalle": {}}
+    disp = {k: v for k, v in comp.items() if _hay_dato(v) and k in pesos}
     wsum = sum(pesos[k] for k in disp)
+    if not disp or wsum <= 0:
+        return {"indice": None, "cobertura": 0.0, "detalle": {}}
     idx = sum(pesos[k] * v for k, v in disp.items()) / wsum
     return {"indice": float(idx), "cobertura": float(wsum / sum(pesos.values())),
             "detalle": {k: {"valor": float(v), "peso_efectivo": float(pesos[k] / wsum)} for k, v in disp.items()}}
 
 
-def indice_desde_modulos(backtest_resumen: dict, respaldo13f: dict | None = None, stock_act: dict | None = None,
-                         absorcion: float | None = None, n_familias: int | None = None, n_valoracion: int = 0,
-                         pesos: dict | None = None) -> dict:
-    """Atajo para el screener: usa las salidas de ``backtest_ranges.resumen``, ``sec_edgar`` y ``stock_act``."""
+def indice_desde_modulos(backtest_resumen: dict | None, respaldo13f: dict | None = None, stock_act: dict | None = None,
+                         absorcion: float | None = None, n_familias: int | None = None,
+                         n_valoracion: int | None = 0, pesos: dict | None = None) -> dict:
+    """Atajo para el screener: usa las salidas de ``backtest_ranges.resumen``, ``sec_edgar`` y ``stock_act``.
+
+    Un dato no disponible EXCLUYE su componente (y baja la ``cobertura``); no se sustituye por 0 ni por neutro:
+    * ``respaldo13f`` (``n_acumulando``, ``n_con_posicion``, ``compras_form4_usd``): cada clave puede ser None
+      (13F sin respuesta / Form 4 fallido); ver ``s_13f``. ``respaldo13f=None`` equivale a todas en None.
+    * ``stock_act``: dict de ``consultar_flujo_congreso_stock_act``. Con ``pts=None`` o ``disponible=False``
+      (consulta fallida) el componente se excluye. ``stock_act=None`` (no consultado) tambien lo excluye.
+    * ``backtest_resumen`` None o vacio: se excluyen backtest y absorcion (salvo que se pase ``absorcion``).
+    * ``n_valoracion``: se pasa tal cual a ``s_confluencia``. None = valoracion no consultada (se excluye la mitad de
+      valoracion de la confluencia y se reescala la de familias; el componente sigue presente, la cobertura no cambia);
+      0 (por defecto) = consultada sin anclas en la zona (dato valido que puntua 0).
+    """
     r13 = respaldo13f or {}
+    bt = backtest_resumen or {}
+    sa = stock_act or {}
+    pts = None if sa.get("disponible") is False else sa.get("pts")
     comp = {"respaldo_13f_form4": s_13f(r13.get("n_acumulando"), r13.get("n_con_posicion"), r13.get("compras_form4_usd")),
-            "stock_act": s_stock_act(None if stock_act is None else stock_act.get("pts")),
-            "absorcion": s_absorcion(absorcion if absorcion is not None else backtest_resumen.get("absorcion")),
-            "backtest": s_backtest(backtest_resumen.get("bounce"), backtest_resumen.get("ret60_mediana"),
-                                   backtest_resumen.get("mae60_mediana")),
+            "stock_act": s_stock_act(pts),
+            "absorcion": s_absorcion(absorcion if absorcion is not None else bt.get("absorcion")),
+            "backtest": s_backtest(bt.get("bounce"), bt.get("ret60_mediana"), bt.get("mae60_mediana")),
             "confluencia": s_confluencia(n_familias, n_valoracion)}
     return calcular_indice_confiabilidad(comp, pesos)
 
@@ -210,7 +294,8 @@ def main():
     ruta_c = os.path.join(CACHE, "casos_resultados.json")
     if os.path.exists(ruta_c):
         from src.validation.case_studies import agregado
-        casos_ag = agregado(json.load(open(ruta_c, encoding="utf-8")))
+        with open(ruta_c, encoding="utf-8") as f:
+            casos_ag = agregado(json.load(f))
     ev = evidencia(ordenes, casos_ag)
     pesos = calibrar_pesos(ev)
     print("=== CALIBRACION DE PESOS DEL INDICE DE CONFIABILIDAD ===")
@@ -218,9 +303,10 @@ def main():
     for k in COMPONENTES:
         z = ev[k]["z"]
         print(f"{k:22}{'n/d' if z is None else f'{z:+.2f}':>8}{PESOS_PRIOR[k]:>10.1%}{pesos[k]:>11.1%}  {ev[k]['detalle']}")
-    json.dump({"pesos": pesos, "prior": PESOS_PRIOR, "mezcla_empirica": MEZCLA_EMPIRICA,
-               "evidencia": {k: {"z": v["z"], "n": v["n"], "detalle": v["detalle"]} for k, v in ev.items()}},
-              open(RUTA_PESOS, "w", encoding="utf-8"), indent=1)
+    with open(RUTA_PESOS, "w", encoding="utf-8") as f:
+        json.dump({"pesos": pesos, "prior": PESOS_PRIOR, "mezcla_empirica": MEZCLA_EMPIRICA,
+                   "evidencia": {k: {"z": v["z"], "n": v["n"], "detalle": v["detalle"]} for k, v in ev.items()}},
+                  f, indent=1)
     tab = tabla_calibracion(ordenes, pesos)
     print(f"\n=== CALIBRACION DEL MODELO: score PIT por tercil vs resultados realizados (n={tab.attrs['n']}) ===")
     t = tab.copy()

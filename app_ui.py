@@ -52,7 +52,8 @@ import plotly.graph_objects as go  # noqa: E402
 from plotly.subplots import make_subplots  # noqa: E402
 
 import main as nucleo  # noqa: E402  (analizar_ticker, leer_watchlist, ordenar_ranking, asignar_capital)
-from src.reporting.charts import marcadores_form4, perfil_histograma, trimestres_acumulacion  # noqa: E402
+from src.reporting.charts import (ETIQUETA_DIST_RSUP, dist_a_r_sup_pct, marcadores_form4,  # noqa: E402
+                                  perfil_histograma, trimestres_acumulacion)
 
 RAIZ = os.path.dirname(os.path.abspath(__file__))
 RUTA_WATCHLIST = os.path.join(RAIZ, "watchlist.csv")
@@ -178,12 +179,13 @@ TOGGLES: dict[str, dict[str, Any]] = {
 # Ayuda contextual del panel lateral (tooltips legibles en oscuro; ver .q-tooltip en css_tema)
 AYUDAS: dict[str, str] = {
     "ticker": "Símbolo bursátil (NVDA, BRK-B). El menú sugiere tu watchlist; también puedes escribir otro.",
-    "capital": "Dinero a repartir entre las mejores zonas (máximo 3). Cambiarlo no recalcula nada: solo reparte de nuevo.",
+    "capital": "Dinero POR TICKER a repartir entre sus mejores zonas (máximo 3). En Watchlist cada activo recibe el "
+               "capital completo; no se reparte entre tickers. Cambiarlo no recalcula nada.",
     **{k: t["ayuda"] + AYUDA_TOGGLE_SUFIJO for k, t in TOGGLES.items()},
     "backtest": "Simula órdenes límite de los últimos años para medir Fill rate, Bounce y MAE. Es lento; sin él esas "
                 "columnas salen n/d. Requiere Recalcular.",
-    "sec": "Consulta SEC EDGAR (Form 4 y 13F) y STOCK Act. Sin esto no hay marcadores de insiders ni 13F. "
-           "Requiere Recalcular.",
+    "sec": "Consulta SEC EDGAR (Form 4 y 13F) y STOCK Act. Sin esto no hay marcadores de insiders ni 13F y la "
+           "cobertura de la Confiabilidad baja. Requiere Recalcular.",
     "recalcular": "Descarga y calcula todo de nuevo para el ticker. Solo hace falta con un ticker nuevo o al cambiar "
                   "Backtest/SEC; capital y familias se actualizan solos.",
 }
@@ -285,15 +287,23 @@ def metricas_auditoria(backtest_resumen: dict | None) -> dict[str, float | None]
     return {"bounce": pct("bounce"), "fill_rate": pct("fill_rate"), "mae": pct("mae60_mediana")}
 
 
+def distancia_zona(z: dict, precio_actual: float | None = None) -> float | None:
+    """Distancia % de ``r_sup`` (limite GTC) al precio actual: la UNICA referencia de distancia (igual que main.py).
+
+    Con precio se recalcula con la formula compartida (``charts.dist_a_r_sup_pct``); sin precio se usa el
+    ``dist_pct`` que ya trae la zona (calculado por main.py con esa misma referencia).
+    """
+    d = dist_a_r_sup_pct(z["r_sup"], precio_actual) if precio_actual else None
+    return d if d is not None else _num(z.get("dist_pct"))
+
+
 def filas_tabla(zonas: list[dict], backtest_resumen: dict | None = None,
                 precio_actual: float | None = None) -> list[dict]:
     """Filas para la tabla de zonas (valores numericos para ordenar; None -> 'n/d' en la plantilla)."""
     aud = metricas_auditoria(backtest_resumen)
     filas = []
     for z in zonas:
-        dist = _num(z.get("dist_pct"))
-        if dist is None and precio_actual:
-            dist = (z["r_sup"] / precio_actual - 1.0) * 100.0
+        dist = distancia_zona(z, precio_actual)
         filas.append({
             "id": int(z.get("nivel", len(filas) + 1)), "nivel": f"N{z.get('nivel', len(filas) + 1)}",
             "r_inf": float(z["r_inf"]), "r_sup": float(z["r_sup"]),
@@ -305,8 +315,29 @@ def filas_tabla(zonas: list[dict], backtest_resumen: dict | None = None,
     return filas
 
 
+def nombres_sin_dato(res: dict) -> list[str]:
+    """Etiquetas legibles de los componentes de la Confiabilidad excluidos por falta de dato."""
+    return [ETIQUETAS_COMPONENTES.get(k, k) for k in (res.get("componentes_sin_dato")
+                                                      or nucleo.componentes_sin_dato(res.get("confiabilidad")))]
+
+
+def texto_alcance_backtest(res: dict) -> str:
+    """Pie de la tabla de zonas: de donde salen Bounce / Fill / MAE (rango primario N1, anios, fills) y su limite."""
+    if not res.get("backtest_resumen"):
+        return "Sin backtest: Bounce / Fill rate / MAE 60d no disponibles (n/d)."
+    n_f, n_o = res.get("n_fills"), res.get("n_ordenes")
+    muestra = "" if n_f is None else f" ({n_f} fills de {n_o if n_o is not None else 'n/d'} órdenes)"
+    alcance = res.get("backtest_alcance") or nucleo.alcance_backtest(res.get("anios_backtest"))
+    return (f"Bounce / Fill rate / MAE 60d: {alcance}{muestra}; se repiten igual en cada fila. "
+            f"Entrada = límite en r_sup; precio prom. pond. = capital total / acciones totales.")
+
+
 def resumen_tarjetas(res: dict, zonas: list[dict]) -> dict[str, Any]:
-    """Datos de las tarjetas superiores: precio, scores, earnings, avisos y precio promedio ponderado."""
+    """Datos de las tarjetas superiores: precio, scores, cobertura, avisos y precio promedio ponderado.
+
+    ``avisos`` junta los de la UI (earnings, sin SEC, sin backtest) con ``res["avisos"]`` de ``main.analizar_ticker``
+    (muestra pequena, gestores 13F que no respondieron, STOCK Act no disponible); ``avisos_datos`` es este ultimo grupo.
+    """
     conf = res.get("confiabilidad") or {}
     earn = res.get("earnings") or {}
     avisos: list[str] = []
@@ -316,11 +347,14 @@ def resumen_tarjetas(res: dict, zonas: list[dict]) -> dict[str, Any]:
         avisos.append("Sin datos SEC (Form 4 / 13F): marcadores omitidos.")
     if not res.get("backtest_resumen"):
         avisos.append("Sin backtest: Bounce/Fill/MAE no disponibles (n/d).")
+    avisos_datos = [str(a) for a in (res.get("avisos") or [])]
     return {"precio": _num(res.get("precio_actual")), "confluencia": _num(res.get("confluencia_score")),
             "confiabilidad": _num(conf.get("indice")), "cobertura": _num(conf.get("cobertura")),
+            "sin_dato": nombres_sin_dato(res), "alcance_backtest": texto_alcance_backtest(res),
             "score_ranking": _num(res.get("score_ranking")), "earnings": earn.get("mensaje"),
             "earnings_alerta": bool(earn.get("alerta_activa")), "errores": list(res.get("errores") or []),
-            "avisos": avisos, "precio_promedio": precio_promedio_ponderado(zonas),
+            "avisos": avisos + avisos_datos, "avisos_datos": avisos_datos,
+            "precio_promedio": precio_promedio_ponderado(zonas),
             "capital_total": float(sum(z.get("capital_asignado", 0.0) for z in zonas)),
             "n_zonas": len(zonas)}
 
@@ -332,13 +366,30 @@ def filas_ranking(resultados: list[dict]) -> tuple[list[dict], list[str]]:
     filas = []
     for i, r in enumerate(nucleo.ordenar_ranking(validos), 1):
         z = r["zonas"][0] if r.get("zonas") else None
+        conf = r.get("confiabilidad") or {}
+        cob = _num(conf.get("cobertura"))
         filas.append({
             "id": r["ticker"], "pos": i, "ticker": r["ticker"], "precio": _num(r.get("precio_actual")),
             "score": _num(r.get("score_ranking")), "confluencia": _num(r.get("confluencia_score")),
-            "confiabilidad": _num((r.get("confiabilidad") or {}).get("indice")),
+            "confiabilidad": _num(conf.get("indice")),
+            "cobertura": None if cob is None else cob * 100.0, "sin_dato": ", ".join(nombres_sin_dato(r)),
             "mejor_zona": f"${z['r_inf']:.2f} - ${z['r_sup']:.2f}" if z else "n/d",
-            "dist_pct": _num(z.get("dist_pct")) if z else None})
+            "dist_pct": distancia_zona(z, r.get("precio_actual")) if z else None})
     return filas, fallidos
+
+
+def nota_ranking() -> str:
+    """Nota visible de la pestana Watchlist: el score ordena, no predice; el peso de la confluencia se calcula al vuelo."""
+    w = nucleo.peso_confluencia_ranking()
+    return (f"Score de ranking = promedio de confluencia y confiabilidad: es una ayuda de organización, no una señal. "
+            f"La confluencia domina el score (≈{_es(w * 100, 1)} %) y la evidencia propia no respalda que más familias "
+            f"mejoren el retorno; scores con cobertura distinta no son comparables.")
+
+
+def coberturas_distintas(filas: list[dict]) -> bool:
+    """True si las filas del ranking tienen coberturas distintas (>= 1 punto de diferencia): sus scores no se comparan."""
+    cobs = [f["cobertura"] for f in filas if f.get("cobertura") is not None]
+    return bool(cobs) and max(cobs) - min(cobs) >= 1.0
 
 
 # --- Figura Plotly -----------------------------------------------------------------------------------------
@@ -429,8 +480,10 @@ def construir_figura(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
         c = COLORES_NIVEL.get(nivel, MUTED)
         sel = nivel_seleccionado == nivel
         lo, hi = float(z["r_inf"]), float(z["r_sup"])
-        etiqueta = f"N{nivel}: ${lo:.2f}-${hi:.2f} ({(hi / px - 1) * 100:+.1f}%) {z.get('fuente', '')}"
-        etiqueta = etiqueta if len(etiqueta) <= 70 else etiqueta[:67] + "..."
+        dist = dist_a_r_sup_pct(hi, px)
+        etiqueta = (f"N{nivel}: ${lo:.2f}-${hi:.2f} | {ETIQUETA_DIST_RSUP} {'n/d' if dist is None else f'{dist:+.1f}%'}"
+                    f" | {z.get('fuente', '')}")
+        etiqueta = etiqueta if len(etiqueta) <= 82 else etiqueta[:79] + "..."
         fig.add_hrect(y0=lo, y1=hi, row=1, col=1, fillcolor=c, opacity=0.42 if sel else 0.16,
                       line_width=2 if sel else 0, line_color=BLANCO, layer="below",
                       annotation_text=etiqueta, annotation_position="top left",
@@ -530,19 +583,22 @@ def normalizacion_componentes(p: dict[str, Any]) -> dict[str, str]:
     """Como se pasa cada componente a 0-100, en palabras simples. Los numeros de la formula (50/30/20, 60/40, 15 pts,
     1 M USD, +15 %, -25 %) estan en scoring.py y los fija test_modelo_normalizacion_consistente_con_scoring."""
     return {
-        "respaldo_13f_form4": "La mitad mide qué fracción de los gestores 13F con posición en la acción la aumentó; la "
-                              "otra mitad mide las compras de insiders (Form 4, código P) en USD, y llega al máximo con "
-                              "1 millón de USD comprados.",
+        "respaldo_13f_form4": "La mitad mide qué fracción de los gestores 13F ACTIVOS con posición en la acción la "
+                              "aumentó (los pasivos de índice no cuentan); la otra mitad mide las compras de insiders "
+                              "(Form 4, código P) en USD, y llega al máximo con 1 millón de USD comprados. Una mitad sin "
+                              "dato se excluye y el componente usa solo la otra; si faltan ambas, el componente se excluye.",
         "stock_act": "Toma los puntos (0 a 15) del flujo de compras de miembros del Congreso de EE. UU. (ley STOCK Act) "
-                     "y los pasa a escala 0-100: 15 puntos equivalen a 100.",
-        "absorcion": f"Es el porcentaje de órdenes ejecutadas en las que, en las {p['ventana_abs']} ruedas desde el toque, "
-                     f"apareció una vela de rechazo dentro de la zona (cierre en el tercio superior y volumen mayor a "
+                     "y los pasa a escala 0-100: 15 puntos equivalen a 100. Si la fuente no responde, el componente se "
+                     "excluye (no vale 0 ni un valor neutro).",
+        "absorcion": f"Es el porcentaje de órdenes ejecutadas en las que, en las {p['velas_abs']} velas desde el toque "
+                     f"(la del toque y las {p['ventana_abs']} siguientes), apareció una vela de rechazo dentro de la zona (cierre en el tercio superior y volumen mayor a "
                      f"{_es(p['vol_mult'], 2)} veces su media de 20 días). Una tasa de 26 % equivale a 26 puntos.",
         "backtest": "Mezcla tres cosas: 50 % el bounce rate, 30 % el retorno mediano a 60 ruedas (llega al máximo con "
                     "+15 %) y 20 % el control de la MAE (0 % de caída da el máximo; -25 % o peor da cero).",
         "confluencia": "60 % por el número de familias que coinciden en la zona (1 familia da 0 y 4 familias dan el "
                        "máximo de esa parte) y 40 % por las anclas de valoración dentro de la zona (2 o más dan el "
-                       "máximo)."}
+                       "máximo). Si la valoración no se pudo consultar, esa parte se excluye y el score usa solo las "
+                       "familias, reescalado a 0-100; si se consultó y ninguna ancla cae en la zona, la parte vale 0."}
 
 
 AVISO_LEGAL = ("**No es asesoría financiera.** Esta herramienta es de investigación y educación: no recomienda "
@@ -566,6 +622,25 @@ def _c(clave: str) -> str:
     return _es(CIFRAS_AUDITORIA[clave])
 
 
+def gestores_13f() -> dict[str, list[str]]:
+    """Gestores 13F que consulta el screener, leidos de ``src/data/sec_edgar.py`` (no se copian a mano).
+
+    ``activos`` cuentan para la acumulacion; ``pasivos`` (Vanguard / State Street, flujos de indice) se consultan y
+    se muestran pero no cuentan. Listas vacias si el modulo no se puede importar.
+    """
+    try:
+        from src.data import sec_edgar
+        pasivos = set(getattr(sec_edgar, "GESTORES_PASIVOS", ()))
+        nombres = list(sec_edgar.GESTORES_13F)
+    except Exception:  # noqa: BLE001
+        return {"activos": [], "pasivos": []}
+    return {"activos": [g for g in nombres if g not in pasivos], "pasivos": [g for g in nombres if g in pasivos]}
+
+
+def _lista_nombres(nombres: list[str]) -> str:
+    return ", ".join(nombres) if nombres else "(lista no disponible)"
+
+
 def _parametros() -> dict[str, Any]:
     """Parametros reales del modelo leidos del codigo (el texto de la pestana no los copia a mano)."""
     from src.levels import valuation_floors as vf
@@ -574,13 +649,16 @@ def _parametros() -> dict[str, Any]:
     return {
         "dist_min": br.DIST_MIN, "dist_max": br.DIST_MAX, "vida_orden": br.VIDA_ORDEN,
         "bounce_pct": br.BOUNCE_PCT, "bounce_ventana": br.BOUNCE_VENTANA, "bounce_inval": br.BOUNCE_INVALIDA,
-        "vol_mult": br.VOL_MULT_ABS, "ventana_abs": br.VENTANA_ABS, "ancho_cluster_atr": br.ANCHO_MAX_CLUSTER_ATR,
+        "vol_mult": br.VOL_MULT_ABS, "ventana_abs": br.VENTANA_ABS,
+        "velas_abs": br.VENTANA_ABS + 1,  # range(k, k + VENTANA_ABS + 1): la vela del toque cuenta
+        "ancho_cluster_atr": br.ANCHO_MAX_CLUSTER_ATR,
         "tickers_bt": list(br.TICKERS_DEFECTO), "anios_bt_ref": br.ANIOS_BACKTEST,
         "vp_anios": vl.VP_ANIOS, "value_area": vl.VALUE_AREA_PCT, "swing_semanas": vl.OB_SWING_SEMANAL,
         "correccion": vl.CORRECCION_MAYOR_PCT, "avwap_dias": vl.AVWAP_MIN_ESTRUCTURAL_DIAS,
         "percentiles": tuple(vf.PERCENTILES), "tasa_dcf": vf.TASA_DESCUENTO, "horizonte_dcf": vf.HORIZONTE_DCF,
         "margenes": tuple(vf.MARGENES_SEGURIDAD), "bandas_sd": tuple(vf.BANDAS_SD),
-        "max_zonas": nucleo.MAX_ZONAS, "max_tramos": nucleo.MAX_TRAMOS_CAPITAL,
+        "max_zonas": nucleo.MAX_ZONAS, "max_tramos": nucleo.MAX_TRAMOS_CAPITAL, "min_fills": nucleo.MIN_FILLS_AVISO,
+        "gestores": gestores_13f(),
         "anios_bt_app": inspect.signature(nucleo.analizar_ticker).parameters["anios_backtest"].default}
 
 
@@ -609,6 +687,182 @@ def _tabla_evidencia() -> dict | None:
             filas.append([ETIQUETAS_COMPONENTES.get(k, k), e.get("detalle", ""), "n/d" if z is None else f"{z:+.2f}"])
     return {"columnas": ["Componente", "Qué se midió (texto original de la calibración)", "z / t"], "filas": filas} \
         if filas else None
+
+
+# Funciones reales citadas por nombre en la seccion "La logica detras" (modulo, funcion). Un test comprueba que cada
+# una exista y que el texto la mencione; si se renombra una en src/, el test avisa.
+FUNCIONES_CITADAS: tuple[tuple[str, str], ...] = (
+    ("src.data.market_data", "descargar_historial"),
+    ("src.data.market_data", "verificar_proximidad_earnings"),
+    ("src.data.sec_edgar", "obtener_13f_ticker"),
+    ("src.data.sec_edgar", "compras_insiders"),
+    ("src.data.stock_act", "consultar_flujo_congreso_stock_act"),
+    ("src.data.stock_act", "sincronizar_repo"),
+    ("src.levels.volume_liquidity", "order_blocks_semanales"),
+    ("src.levels.valuation_floors", "calcular_pisos_valoracion"),
+    ("src.validation.backtest_ranges", "calcular_zonas_pit"),
+    ("src.validation.backtest_ranges", "backtest_ticker"),
+    ("src.validation.scoring", "indice_desde_modulos"),
+    ("main", "asignar_capital"),
+)
+# Ejemplo de semiconductores: TODAS estas cifras son inventadas y el texto las rotula como ILUSTRATIVAS.
+EJ_SEMI = {"precio": 100.0, "tramos": ((90.0, 0.50), (84.0, 0.30), (78.0, 0.20)), "minimo": 76.0}
+
+
+def _seccion_logica(p: dict[str, Any]) -> dict:
+    """Seccion "La logica detras: como y por que (en simple)". Texto para no expertos; parametros y gestores se
+    leen del codigo, las cifras de evidencia de ``CIFRAS_AUDITORIA`` (verificadas contra docs/METODOLOGIA.md)."""
+    ges = p["gestores"]
+    n_ges = len(ges["activos"]) + len(ges["pasivos"])
+    pct0 = lambda f: _es(f * 100, 0)  # noqa: E731
+    ej = EJ_SEMI
+    t1, t2, t3 = ej["tramos"]
+    prom = 1.0 / sum(w / pr for pr, w in ej["tramos"])  # precio promedio si se ejecutan los tres tramos
+    mae_1 = (ej["minimo"] / t1[0] - 1) * 100
+    mae_prom = (ej["minimo"] / prom - 1) * 100
+    f = lambda k: _c(k)  # noqa: E731
+    par: list[Any] = [
+        "Esta sección explica el *por qué* del modelo con palabras simples. Separa tres cosas: **la idea** (la "
+        "hipótesis), **cómo se calcula** (lo que hace el código) y **lo que está demostrado** (la evidencia propia, que "
+        "es modesta). Mezclarlas es el error más común al leer herramientas como esta.",
+
+        "### 1. La idea central",
+        "Un fondo grande no puede comprar todo lo que quiere de golpe: si lo intentara, su propia compra empujaría el "
+        "precio hacia arriba y pagaría más caro. Por eso suele acumular poco a poco, en zonas donde hay vendedores "
+        "dispuestos (liquidez). Esas compras dejan **huellas**: mucho volumen en un rango de precios, rechazos "
+        "repetidos del mismo piso, estructuras que el precio respeta.",
+        {"ejemplo": "**Analogía:** imagina a alguien que necesita comprar 10 000 kilos de fruta en un mercado pequeño. Si "
+                    "pide todo al primer puesto, el precio sube. Va pasando por varios puestos y deja marcas: puestos "
+                    "donde se vendió mucho, precios que se repiten. El modelo no ve al comprador; busca esas marcas y "
+                    "señala los lugares donde **varias marcas distintas coinciden**."},
+        "Esa coincidencia es la *confluencia* (sección 3). La hipótesis es que una zona con varias huellas "
+        "independientes es un lugar más razonable para dejar una orden que un precio cualquiera. Es una hipótesis, "
+        "no una ley: más adelante verás qué dice la evidencia.",
+
+        "### 2. Cómo lo logra, paso a paso",
+        "Es el flujo real de `main.analizar_ticker`:",
+        {"lista": [
+            "**1. Datos.** Baja el historial de precios y volumen ajustado (`descargar_historial`, yfinance) y mira si "
+            "hay resultados trimestrales (earnings) cerca (`verificar_proximidad_earnings`), porque una orden "
+            "abierta durante un reporte puede saltarse el precio con un gap.",
+            f"**2. Niveles por familia.** Calcula las anclas de cada familia: perfil de volumen de {p['vp_anios']} años, "
+            f"Order Blocks semanales (`order_blocks_semanales`), AVWAP, mínimos semanales y regresión logarítmica. "
+            f"Solo usan datos hasta hoy.",
+            f"**3. Confluencia y clusters.** Agrupa las anclas cercanas en zonas (`calcular_zonas_pit`; ancho máximo "
+            f"{_es(p['ancho_cluster_atr'], 0)} ATR semanales) y las numera N1 a N{p['max_zonas']} por cuántas familias "
+            f"distintas coinciden.",
+            "**4. Valoración.** Compara el precio con los múltiplos históricos de la propia empresa (P/E, EV/FCF), un "
+            "DCF conservador y la banda de regresión (`calcular_pisos_valoracion`). Cuenta cuántas de esas líneas "
+            "caen dentro de la zona principal.",
+            "**5. Respaldo de compras reales.** Revisa si insiders compraron con su dinero (Form 4, código P: "
+            "`compras_insiders`), si fondos grandes aumentaron posición (13F: `obtener_13f_ticker`) y qué hizo el "
+            "Congreso de EE. UU. (STOCK Act: `consultar_flujo_congreso_stock_act`).",
+            f"**6. Backtest walk-forward.** Reconstruye, mes a mes y usando solo lo que se sabía en cada fecha, las "
+            f"zonas del pasado y simula órdenes límite con vida de {p['vida_orden']} ruedas (`backtest_ticker`). Mide "
+            f"cuántas se ejecutan, cuántas rebotan y cuánto cae el precio después de comprar.",
+            "**7. Índice de confiabilidad.** Resume cinco componentes en un número de 0 a 100 "
+            "(`indice_desde_modulos`). Un dato que no se pudo obtener se excluye, no cuenta como cero.",
+            f"**8. Reparto de capital.** Reparte tu capital entre las {p['max_tramos']} mejores zonas, en proporción a "
+            f"su número de familias (`asignar_capital`), con una orden límite en el techo de cada zona."]},
+
+        "### 3. De dónde salen los datos",
+        {"lista": [
+            "**Precios, volumen y calendario de earnings: yfinance** (librería no oficial que consulta Yahoo Finance). "
+            "Aporta el historial ajustado por dividendos y splits y el calendario de resultados. Se descarga cada vez que "
+            "pulsas Recalcular; esta app guarda en memoria el último resultado de cada ticker hasta que la cierras. "
+            "Si falla (sin red o ticker inexistente), no hay análisis de ese ticker y se muestra el error. Los "
+            "ajustes por dividendo usan información posterior: una distorsión pequeña.",
+            "**SEC EDGAR, vía la librería `edgartools`:** es la fuente primaria. Se usa para tres cosas (siguientes puntos), y su manejo de fallos es común:",
+            f"**13F-HR** (`obtener_13f_ticker`): la tenencia trimestral de {n_ges} gestores concretos "
+            f"({_lista_nombres(ges['activos'] + ges['pasivos'])}); cuentan solo los activos "
+            f"({_lista_nombres(ges['activos'])}). El 13F se presenta hasta unos 45 días después del cierre del "
+            "trimestre: es información vieja, y no trae el día ni el precio de la compra.",
+            "**Form 4** (`compras_insiders`): operaciones de directivos y grandes accionistas; se filtran solo las "
+            "de código P (compra en mercado abierto). La regla de la SEC es presentarlo en 2 días hábiles tras la "
+            "operación (es la norma de la SEC; el código no lo verifica). Revisa como máximo los 60 filings más "
+            "recientes del último año.",
+            "**Estados financieros 10-K / 10-Q** (datos XBRL, `get_facts`): ingresos, EPS, flujo de caja, deuda, "
+            "acciones; alimentan la valoración. Salen con un rezago de unos 40 a 60 días tras cada cierre (el código supone 45 para evitar mirar "
+            "el futuro) y la fecha del último 10-K ancla un AVWAP. Si EDGAR falla, el EPS cae a yfinance (solo unos 5 trimestres: menos "
+            "historia) y, para la fecha del 10-K, a una estimación.",
+            "**Si EDGAR no responde:** un Form 4 fallido, un 13F sin respuesta de ningún gestor activo o una valoración "
+            "sin consultar se tratan como **dato no disponible** (se excluyen y baja la cobertura), nunca como cero. "
+            "EDGAR exige identificarse (variable `SEC_EDGAR_IDENTITY`).",
+            "**STOCK Act (Congreso de EE. UU.):** se lee el repositorio público de GitHub "
+            "`kadoa-org/congress-trading-monitor` (carpeta `public/data`, `sincronizar_repo`). Las operaciones de "
+            "legisladores se reportan con retraso (la norma legal da hasta unos 45 días; el código no lo verifica) y "
+            "con rangos de monto, no cifras exactas. Se guarda una copia local que se renueva si tiene más de 24 horas. Si no se puede descargar o "
+            "leer, el componente se marca no disponible.",
+            "**`smartmoneyconcepts`** (librería de terceros, sin conexión a internet): detecta los Order Blocks "
+            "semanales no mitigados. Es un concepto popular sin respaldo académico formal.",
+            "**Caché local:** el backtest de validación guarda precios y órdenes en `src/validation/_cache`, y STOCK Act "
+            "guarda su repositorio en `src/data/_cache`. Las consultas a EDGAR de esta app no se guardan en disco."]},
+
+        "### 4. Por qué debería funcionar (hipótesis) y qué muestra la evidencia propia",
+        "**La lógica (hipótesis):** los grandes jugadores acumulan donde hay liquidez; esas zonas dejan huellas; "
+        "cuando varias coinciden, son lugares donde el precio ya fue aceptado antes y donde hay compradores con "
+        "historial. Además, anclar las zonas a estructuras de varios años (y no al cierre de ayer) evita que se muevan "
+        "con el ruido diario.",
+        "**Lo demostrado (auditoría propia, `docs/METODOLOGIA.md`):**",
+        {"lista": [
+            f"El índice de confiabilidad **no discrimina resultados**: correlación con el rebote {f('spearman_bounce')} y "
+            f"con el retorno a 60 ruedas {f('spearman_ret60')} ({f('n_calibracion')} órdenes). El tercio de mayor score "
+            f"rebotó {f('tercil_alto_bounce')} y el de menor score {f('tercil_bajo_bounce')}.",
+            f"La **mediana a 252 ruedas** de comprar en el rango ({f('mediana252_fill')}) es casi idéntica a la línea base "
+            f"({f('mediana252_base')}). Solo la media mejora (+{f('media_pp60')[1:]} puntos a 60 ruedas), y se concentra en "
+            f"acciones que subieron en el período.",
+            f"La **MAE es peor**: mediana a 60 ruedas {f('mae60_mediana')} contra {f('mae60_base')} de la base. Se compra "
+            f"después de una caída y el precio sigue cediendo antes de rebotar.",
+            f"Con los 13F: los rangos calculados solo con datos previos **no coinciden mejor que el azar** con las zonas "
+            f"donde compraron los fondos ({f('solape_rodante')} contra {f('solape_control')} de un rango aleatorio) y la "
+            f"muestra es muy pequeña ({f('n_trimestres_13f')} trimestres).",
+            "Los pisos de valoración, Form 4 y STOCK Act **no se probaron** empíricamente (faltan series históricas "
+            "*point-in-time*). Hay sesgo de supervivencia: la muestra eran acciones grandes que ganaron."]},
+        {"aviso": "**Conclusión honesta.** *Lo que aporta:* disciplina, un plan de entradas escalonadas, riesgo definido "
+                  "antes de comprar, trazabilidad con fuentes primarias (SEC) y niveles que no dependen del cierre "
+                  "intradía. *Lo que NO se puede afirmar:* que las zonas predigan rebotes, que el índice anticipe "
+                  "resultados ni que esto supere a comprar sin más. Es una herramienta para ordenar y planificar, no una "
+                  "señal."},
+
+        "### 5. Un ejemplo sencillo: semiconductores",
+        {"ejemplo": f"**ILUSTRATIVO, NO REAL.** Todas las cifras de este ejemplo son inventadas para explicar; no son "
+                    f"precios, datos ni zonas reales de NVDA ni de ningún otro ticker."},
+        "Los semiconductores son un sector **cíclico y muy volátil**: pasan de épocas de demanda enorme a épocas de "
+        "exceso de inventario, y las acciones se mueven mucho más que el mercado. Para una empresa como NVDA, "
+        "*imagina* estos números:",
+        {"lista": [
+            f"Precio actual (inventado): **{_es(ej['precio'], 0)} USD**. El modelo marca tres zonas por debajo, con "
+            f"techos en {_es(t1[0], 0)}, {_es(t2[0], 0)} y {_es(t3[0], 0)} USD (ejemplo inventado).",
+            f"Con 1000 USD (inventados) en tramos de {pct0(t1[1])} %, {pct0(t2[1])} % y {pct0(t3[1])} %, tu precio "
+            f"promedio si se ejecutan los tres sería de **{_es(prom, 1)} USD**.",
+            f"Supón que el precio cae hasta {_es(ej['minimo'], 0)} USD antes de rebotar. Quien compró todo en el primer "
+            f"techo ({_es(t1[0], 0)}) sufrió una MAE de **{_es(mae_1, 1)} %**; con el escalonamiento, medida contra el "
+            f"precio promedio, fue de {_es(mae_prom, 1)} %."]},
+        "**Por qué importan aquí la MAE y el escalonamiento.** En un sector volátil el precio suele pasar de largo "
+        "por el primer nivel y seguir cayendo antes de rebotar (justo lo que mostró la auditoría: MAE peor que la "
+        "base). Por eso el modelo no manda todo a un solo precio: reparte en varios tramos y te muestra la MAE de "
+        "antemano, para que decidas cuánto caída puedes aguantar *antes* de comprar y no después.",
+        "**¿Y si cambia el ciclo del sector?** Las zonas se calculan con la historia (por ejemplo, "
+        f"{p['vp_anios']} años de volumen). Si el sector pasa de un ciclo a otro (de auge a recesión, o por un cambio "
+        "tecnológico), esas zonas pueden dejar de ser relevantes: el precio las perfora y no rebota. El modelo "
+        "no tiene ninguna lógica específica de sector ni de ciclo; no sabe en qué fase está la industria. Las zonas se "
+        "recalculan al pulsar Recalcular y el backtest mide solo el pasado, que puede no repetirse.",
+
+        "### 6. Limitaciones, en corto",
+        {"lista": [
+            "Los 13F llegan con hasta 45 días de retraso y sin día ni precio de compra; solo se consultan "
+            f"{n_ges} gestores ({len(ges['activos'])} activos): es una muestra mínima de fondos, no el universo.",
+            f"Sesgo de supervivencia: la auditoría usó {len(p['tickers_bt'])} acciones de gran capitalización de "
+            f"{p['anios_bt_ref']} años mayormente alcistas. Las órdenes se solapan y las pruebas estadísticas salen "
+            f"infladas.",
+            "Los pisos de valoración (P/E, EV/FCF, DCF) no están auditados.",
+            "No se modelan costos de transacción, impuestos ni liquidez.",
+            "Sector cíclico o cambio de régimen: lo que funcionó (o no) en el pasado puede no repetirse.",
+            "Los datos que faltan se excluyen del índice (baja la cobertura) y no se rellenan con valores neutros.",
+            f"Con menos de {p['min_fills']} ejecuciones simuladas, las métricas del backtest de un ticker son ruido."]},
+        {"aviso": "Material educativo; no es asesoría financiera."}]
+    return {"id": "logica", "titulo": "2. La lógica detrás: cómo y por qué (en simple)", "icono": "psychology",
+            "abierta": True, "parrafos": par}
 
 
 def contenido_modelo() -> list[dict]:
@@ -667,8 +921,11 @@ def contenido_modelo() -> list[dict]:
         {"ejemplo": f"Ejemplo: con la acción a 100 USD, solo se consideran zonas ubicadas entre unos "
                     f"{_es(100 * (1 - p['dist_max']), 0)} y {_es(100 * (1 - p['dist_min']))} USD."}]})
 
-    # 2 ---------------------------------------------------------------------------------------------------
-    secciones.append({"id": "familias", "titulo": "2. Las familias de niveles y la confluencia", "icono": "layers",
+    # 2 (La logica detras, en simple) ---------------------------------------------------------------------
+    secciones.append(_seccion_logica(p))
+
+    # 3 ---------------------------------------------------------------------------------------------------
+    secciones.append({"id": "familias", "titulo": "3. Las familias de niveles y la confluencia", "icono": "layers",
                       "abierta": False, "parrafos": [
         f"El modelo usa {len(TOGGLES)} «familias» de señales. Cada una mira el mismo precio desde un ángulo distinto:",
         {"lista": [
@@ -710,21 +967,25 @@ def contenido_modelo() -> list[dict]:
         f"**Score de confluencia (0 a 100):** 60 % sale del número de familias (1 familia da 0 puntos y 4 familias dan "
         f"los 60) y 40 % de las anclas de valoración dentro de la zona (2 o más dan los 40). Ejemplos: 1 familia sin "
         f"valoración = {_es(c_1_0, 0)}; 3 familias sin valoración = {_es(c_3_0, 0)}; 4 familias con 2 anclas de "
-        f"valoración = {_es(c_4_2, 0)}."]})
+        f"valoración = {_es(c_4_2, 0)}. «Sin valoración» significa que se consultó y ninguna ancla cae en la zona "
+        f"(vale 0). Si la valoración no se pudo consultar (por ejemplo, sin red hacia la fuente de datos), esa parte "
+        f"se excluye y el score se reescala con las familias; la app lo avisa («valoracion ... no disponible»)."]})
 
     # 3 ---------------------------------------------------------------------------------------------------
-    secciones.append({"id": "grafico", "titulo": "3. Cómo leer el gráfico", "icono": "candlestick_chart",
+    secciones.append({"id": "grafico", "titulo": "4. Cómo leer el gráfico", "icono": "candlestick_chart",
                       "abierta": False, "parrafos": [
         {"lista": [
             "**Velas:** cada vela es un día. Verde = cerró más arriba de lo que abrió; roja = cerró más abajo. La línea "
             "punteada gris es la media móvil de 200 días (SMA 200D).",
             "**Bandas de colores horizontales:** son las zonas N1 (verde), N2 (celeste), N3 (naranja) y N4 (violeta). "
-            "La etiqueta indica el rango en USD, la distancia al precio actual y las familias que coinciden. Si "
-            "seleccionas una fila de la tabla, su banda se resalta.",
+            "La etiqueta indica el rango en USD, la «dist. a r_sup» (distancia del techo de la zona, r_sup, que es el "
+            "precio de tu orden límite, al precio actual) y las familias que coinciden. Si seleccionas una fila de la "
+            "tabla, su banda se resalta.",
             "**Triángulos verdes ▲ (Form 4):** compras de directivos o insiders en mercado abierto (código P), en la "
             "fecha de la operación. Es dinero propio que ellos pusieron.",
-            "**Rombos violeta ◆ (13F) y bandas verticales tenues:** trimestres en que al menos un gran fondo aumentó "
-            "o abrió posición según su 13F. El 13F solo informa por trimestre: no dice el día ni el precio de la compra, así que "
+            "**Rombos violeta ◆ (13F) y bandas verticales tenues:** trimestres en que al menos un gran fondo ACTIVO "
+            "aumentó o abrió posición según su 13F (Vanguard y State Street, pasivos de índice, no cuentan). El 13F "
+            "solo informa por trimestre: no dice el día ni el precio de la compra, así que "
             "el rombo se coloca sobre el cierre del trimestre. Sirven para comprobar a ojo si los grandes jugadores "
             "compraron cerca de tus zonas.",
             f"**Panel derecho (Volume Profile):** barras horizontales con el volumen negociado en cada precio durante "
@@ -736,13 +997,15 @@ def contenido_modelo() -> list[dict]:
             "el valor de la SMA de ese día."]}]})
 
     # 4 ---------------------------------------------------------------------------------------------------
-    secciones.append({"id": "panel", "titulo": "4. El panel lateral explicado", "icono": "tune",
+    secciones.append({"id": "panel", "titulo": "5. El panel lateral explicado", "icono": "tune",
                       "abierta": False, "parrafos": [
         f"**Ticker:** el símbolo de la acción (por ejemplo NVDA o BRK-B). El menú sugiere los de tu watchlist.csv y "
         f"también puedes escribir otro.",
-        f"**Capital USD:** el dinero que quieres repartir. Solo reciben capital las {p['max_tramos']} mejores zonas, "
-        f"repartido en proporción a su número de familias, y cada tramo se compra con una orden límite en el techo de "
-        f"la zona (r_sup).",
+        f"**Capital USD:** el dinero que quieres repartir **por ticker**. Solo reciben capital las {p['max_tramos']} "
+        f"mejores zonas, repartido en proporción a su número de familias, y cada tramo se compra con una orden límite "
+        f"en el techo de la zona (r_sup). **En la pestaña Watchlist (y en `--watchlist`) cada ticker recibe el capital "
+        f"completo; no se reparte entre tickers:** si se ejecutaran las órdenes de 10 activos harían falta 10 veces ese "
+        f"capital. El presupuesto total lo decides tú.",
         {"ejemplo": f"Ejemplo con {_es(ej['capital'], 0)} USD y 3 zonas de 3, 2 y 1 familias (6 en total): la primera "
                     f"recibe 3/6 = {_es(z1['capital_asignado'], 2)} USD, la segunda 2/6 = "
                     f"{_es(z2['capital_asignado'], 2)} USD y la tercera 1/6 = {_es(z3['capital_asignado'], 2)} USD. "
@@ -774,7 +1037,7 @@ def contenido_modelo() -> list[dict]:
                                               "en esta sesión (queda en memoria hasta cerrar la app)."]]}}]})
 
     # 5 ---------------------------------------------------------------------------------------------------
-    secciones.append({"id": "metricas", "titulo": "5. Las métricas de la tabla", "icono": "table_chart",
+    secciones.append({"id": "metricas", "titulo": "6. Las métricas de la tabla", "icono": "table_chart",
                       "abierta": False, "parrafos": [
         {"lista": [
             f"**Fill Rate (tasa de ejecución):** de las órdenes límite colocadas, cuántas llegaron a ejecutarse. "
@@ -794,14 +1057,18 @@ def contenido_modelo() -> list[dict]:
             "meses; 252 = 1 año bursátil). Ejemplo: compro a 100 y 60 ruedas después el cierre es 106 = +6 %. Esta "
             "tabla no tiene columnas de retorno: el retorno mediano a 60 ruedas pesa dentro de la Confiabilidad y "
             "los tres horizontes se comentan en la auditoría (docs/METODOLOGIA.md).",
-            "**Dist. %:** distancia del techo de la zona al precio actual. Ejemplo: precio 100 y techo 95 = -5 % (la zona "
-            "está 5 % por debajo).",
+            "**Dist. a r_sup (%):** distancia del techo de la zona (r_sup, el precio de tu orden límite GTC) al precio "
+            "actual. Ejemplo: precio 100 y techo 95 = -5 % (la zona está 5 % por debajo). Es la misma referencia en la "
+            "tabla, el gráfico, la consola y el export.",
             "**Capital, Acciones y Precio entrada:** el capital asignado a la zona, cuántas acciones compra (capital / "
             "techo) y el precio de la orden límite (el techo de la zona).",
             "**Precio prom. pond.** (tarjeta superior): capital total / acciones totales, como en el ejemplo de la "
-            "sección 4."]},
-        {"aviso": "Bounce, Fill rate y MAE 60d son del *rango primario* del ticker (el grupo de mayor confluencia del "
-                  "backtest), no de cada fila. Por eso se repiten igual en todas las filas."}]})
+            "sección 5."]},
+        {"aviso": f"Bounce, Fill rate y MAE 60d son del *rango primario* (N1) del ticker, no de cada fila, y salen de un "
+                  f"backtest de {p['anios_bt_app']} años: se repiten igual en todas las filas y **no son comparables con "
+                  f"el pool de la auditoría** (docs/METODOLOGIA.md: {len(p['tickers_bt'])} acciones, {p['anios_bt_ref']} años). Si el "
+                  f"backtest tiene menos de {p['min_fills']} ejecuciones simuladas, la app avisa «muestra pequeña: N "
+                  f"fills» y esas cifras son ruido."}]})
 
     # 6 ---------------------------------------------------------------------------------------------------
     tabla_pesos = {"columnas": ["Componente", "Peso a priori", "Peso calibrado (el que se usa)", "Cómo se normaliza a 0-100"],
@@ -820,7 +1087,17 @@ def contenido_modelo() -> list[dict]:
         f"**Cobertura:** es la parte del peso total que tiene datos. Si un componente no tiene dato (por ejemplo, sin "
         f"red hacia SEC o sin backtest) se **excluye** y los pesos de los demás se reescalan para volver a sumar "
         f"100 %. Cobertura = suma de pesos disponibles / suma de todos los pesos. Se muestra debajo de la tarjeta "
-        f"«Confiabilidad inst.».",
+        f"«Confiabilidad inst.», junto con los componentes que quedaron excluidos («sin dato: ...»).",
+        "**Un dato no disponible no es un cero ni un valor neutro.** Si una consulta falla (Form 4 sin respuesta, "
+        "gestores 13F que no contestaron, STOCK Act sin conexión, valoración sin consultar), ese dato se excluye (el "
+        "resto se reescala) y la cobertura baja; en cambio un dato obtenido que vale cero (0 USD de compras de "
+        "insiders, 0 gestores activos con posición, ninguna ancla de valoración en la zona) sí es dato y puntúa cero. "
+        "Si no respondió ningún gestor activo (aunque sí respondan los pasivos), el 13F cuenta como no disponible. "
+        "Los gestores que no respondieron se listan en Avisos («13f: no respondieron: ...»).",
+        f"**13F: solo cuentan los gestores activos.** El screener consulta {len(p['gestores']['activos']) + len(p['gestores']['pasivos'])} "
+        f"gestores (leídos de `src/data/sec_edgar.py`). Activos, que cuentan para la acumulación: "
+        f"{_lista_nombres(p['gestores']['activos'])}. Pasivos de índice, que se consultan y se muestran pero no cuentan: "
+        f"{_lista_nombres(p['gestores']['pasivos'])}. Es una muestra muy pequeña de fondos, no el universo 13F.",
         {"ejemplo": f"Ejemplo con valores inventados: sin datos de {nombres_falta} (peso {_pct(peso_falta)}), la "
                     f"cobertura es {_pct(ind['cobertura'])}. Cada componente con dato entra con su peso efectivo "
                     f"(su peso dividido entre la suma de los pesos disponibles) y el índice es la suma de los "
@@ -828,13 +1105,16 @@ def contenido_modelo() -> list[dict]:
         {"tabla": {"columnas": ["Componente", "Valor (0-100)", "Peso efectivo", "Aporte"], "filas": filas_ej}},
         f"**Score de ranking (pestaña Watchlist):** es el promedio simple de la confluencia (0-100) y la confiabilidad "
         f"(0-100); si falta una de las dos, se usa la que haya. Ejemplo: confluencia 80 y confiabilidad 40 dan un "
-        f"score de {_es(rank_ej, 0)}. Sirve para ordenar la lista, no para predecir.",
-        "**Score de confluencia:** se explica en la sección 2 y es una de las dos mitades del score de ranking."]
-    secciones.append({"id": "confiabilidad", "titulo": "6. La Confiabilidad (índice de 0 a 100)", "icono": "verified",
+        f"score de {_es(rank_ej, 0)}. Sirve para ordenar la lista, no para predecir. Dos scores con cobertura distinta "
+        f"(por ejemplo, uno con backtest y otro sin él) no son comparables.",
+        "**Score de confluencia:** se explica en la sección 3 y es una de las dos mitades del score de ranking."]
+    secciones.append({"id": "confiabilidad", "titulo": "7. La Confiabilidad (índice de 0 a 100)", "icono": "verified",
                       "abierta": False, "parrafos": par_conf})
 
     # 7 ---------------------------------------------------------------------------------------------------
     evid = _tabla_evidencia()
+    w_rank = nucleo.peso_confluencia_ranking(pesos)
+    ev_confl = next((f[1] for f in (evid or {}).get("filas", []) if f[0] == nombre("confluencia")), "")
     lim: list[Any] = [
         {"aviso": AVISO_LEGAL},
         {"lista": [
@@ -860,9 +1140,16 @@ def contenido_modelo() -> list[dict]:
             f"solape estricto {_c('solape_estricto')}. Los fondos compraron cerca del mercado y en tendencia; el "
             f"algoritmo propone zonas estructurales profundas. Además, el 13F no trae fecha de ejecución, llega con "
             f"hasta 45 días de retraso y no incluye posiciones cortas ni fuera de EE. UU.",
-            f"**Las métricas de auditoría de esta app son del rango primario del ticker y se repiten en todas las "
+            f"**Las métricas de auditoría de esta app son del rango primario (N1) del ticker y se repiten en todas las "
             f"filas** (no son por zona). Además salen de un backtest de {p['anios_bt_app']} años de un solo ticker: "
-            f"como máximo unas 60 órdenes mensuales que se solapan entre sí, una muestra pequeña y ruidosa.",
+            f"como máximo unas 60 órdenes mensuales que se solapan entre sí, una muestra pequeña y ruidosa, **no "
+            f"comparable con el pool de la auditoría**. Con menos de {p['min_fills']} ejecuciones simuladas la app "
+            f"avisa «muestra pequeña: N fills».",
+            f"**El ranking de la Watchlist es una ayuda de organización, no una señal.** Su score está dominado por la "
+            f"confluencia: pesa ≈{_es(w_rank * 100, 1)} % del score con cobertura completa (50 % directo más la parte que la "
+            f"confluencia tiene dentro de la confiabilidad, {_pct(pesos.get('confluencia', 0.0))}; más si faltan otros "
+            f"componentes). Y la evidencia propia no respalda que más familias coincidiendo mejoren el retorno"
+            + (f" ({ev_confl})" if ev_confl else "") + ". Úsalo solo para decidir qué ticker revisar primero.",
             f"**Sesgo de la muestra:** la auditoría de referencia usó {len(p['tickers_bt'])} acciones de gran "
             f"capitalización ({', '.join(p['tickers_bt'])}) durante {p['anios_bt_ref']} años mayormente alcistas "
             f"({_c('n_ordenes')} órdenes válidas, {_c('n_fills')} ejecutadas): hay sesgo de supervivencia (se eligieron "
@@ -872,7 +1159,7 @@ def contenido_modelo() -> list[dict]:
             "auditaron porque no son *point-in-time* (usan datos que no existían en cada fecha): su aporte empírico "
             "es desconocido. Form 4 y STOCK Act tampoco se probaron empíricamente por falta de series históricas.",
             f"**Parámetros fijados a priori:** el umbral de bounce (+{pct0(p['bounce_pct'])} % en {p['bounce_ventana']} "
-            f"ruedas, invalidación en -{pct0(p['bounce_inval'])} %), la ventana de absorción ({p['ventana_abs']} ruedas) y "
+            f"ruedas, invalidación en -{pct0(p['bounce_inval'])} %), la ventana de absorción ({p['velas_abs']} velas: la del toque y las {p['ventana_abs']} siguientes) y "
             f"las ponderaciones de normalización no fueron optimizados.",
             "**No modelado:** costos de transacción, impuestos y liquidez. Los precios están ajustados por dividendos y "
             "splits, y el ajuste por dividendos usa información posterior (distorsión pequeña). Sin red, SEC EDGAR y "
@@ -882,12 +1169,12 @@ def contenido_modelo() -> list[dict]:
             f"extrapolar a un ticker concreto."]}]
     if evid:
         lim.append("**Lo que midió cada componente en la calibración** (es la evidencia detrás de los pesos de la "
-                   "sección 6):")
+                   "sección 7):")
         lim.append({"tabla": evid})
     lim.append(f"Fuente: `docs/METODOLOGIA.md` (cifras con datos al {FECHA_AUDITORIA}). Para reproducirlas: "
                f"`python -m src.validation.backtest_ranges`, `python -m src.validation.case_studies` y "
                f"`python -m src.validation.scoring`.")
-    secciones.append({"id": "limitaciones", "titulo": "7. Limitaciones honestas", "icono": "report_problem",
+    secciones.append({"id": "limitaciones", "titulo": "8. Limitaciones honestas", "icono": "report_problem",
                       "abierta": True, "parrafos": lim})
     return secciones
 
@@ -966,6 +1253,16 @@ def _slot(expr: str) -> str:
     return _PLANTILLA_NUM % expr
 
 
+def _cabecera_con_ayuda(texto: str) -> str:
+    """Plantilla de cabecera de columna con tooltip (mantiene el orden por clic de Quasar)."""
+    return f"<q-th :props=\"props\">{{{{ props.col.label }}}}<q-tooltip>{texto}</q-tooltip></q-th>"
+
+
+# Celda de cobertura del ranking: porcentaje y, si hay componentes excluidos, un tooltip "Sin dato: ...".
+_PLANTILLA_COBERTURA = ("<q-td :props=\"props\">{{ props.value == null ? 'n/d' : props.value.toFixed(0) + '%' }}"
+                        "<q-tooltip v-if=\"props.row.sin_dato\">Sin dato: {{ props.row.sin_dato }}</q-tooltip></q-td>")
+
+
 class Vista:
     """Estado y widgets de una pagina; los calculos pesados no bloquean el bucle de eventos."""
 
@@ -973,7 +1270,9 @@ class Vista:
         from nicegui import ui
         self.ui = ui
         self.watchlist = cargar_watchlist()
-        self.ticker: str | None = None
+        # El select arranca mostrando el primer ticker de la watchlist: el estado interno debe coincidir con lo que
+        # se ve (si no, la pagina muestra "NVDA" pero analiza/refresca "nada" hasta el primer cambio manual).
+        self.ticker: str | None = validar_ticker(self.watchlist[0]) if self.watchlist else None
         self.nivel_sel: int | None = None
         self.activos: dict[str, bool] = {k: True for k in TOGGLES}
         self.ocupado = False
@@ -997,8 +1296,7 @@ class Vista:
             ui.label("Niveles institucionales").classes("text-h6")
             with ui.row().classes("w-full items-center no-wrap gap-1"):
                 self.sel_ticker = ui.select(
-                    self.watchlist, value=self.watchlist[0] if self.watchlist else None, label="Ticker",
-                    with_input=True, new_value_mode="add-unique", clearable=True,
+                    self.watchlist, value=self.ticker, label="Ticker", with_input=True, new_value_mode="add-unique", clearable=True,
                     on_change=lambda e: self._ticker_cambiado(e.value)).classes("grow")
                 self._ayuda("ticker")
             with ui.row().classes("w-full items-center no-wrap gap-1"):
@@ -1047,17 +1345,19 @@ class Vista:
                     self.tarj[clave] = ui.label("n/d").classes("text-h6")
                     if clave == "confiabilidad":
                         self.tarj_cob = ui.label("").classes("text-caption txt-muted")
+                        self.tarj_cob.tooltip("Cobertura: parte del peso de la Confiabilidad que tenía dato. Los "
+                                              "componentes sin dato se excluyen: no cuentan como 0 ni como neutro.")
+                        self.tarj_excl = ui.label("").classes("text-caption txt-aviso") \
+                            .style("max-width: 210px; white-space: normal")
             with ui.card().classes("grow p-3"):
                 ui.label("Avisos").classes("text-caption txt-muted")
                 self.avisos = ui.column().classes("gap-0")
         self.grafico = ui.plotly(construir_figura(None, "-")).classes("w-full")
-        ui.label("Bounce / Fill / MAE60: auditoria walk-forward del ticker (rango primario), igual en cada fila. "
-                 "Entrada = limite en r_sup; precio prom. pond. = capital total / acciones totales.") \
-            .classes("text-caption txt-muted")
+        self.lbl_bt = ui.label(texto_alcance_backtest({})).classes("text-caption txt-muted")
         self.tabla = ui.table(columns=[
             dict(name="nivel", label="Nivel", field="nivel", sortable=True, align="left"),
             dict(name="rango", label="Rango inf - sup", field="r_inf", sortable=True, align="left"),
-            dict(name="dist_pct", label="Dist. %", field="dist_pct", sortable=True),
+            dict(name="dist_pct", label=f"{ETIQUETA_DIST_RSUP} %".capitalize(), field="dist_pct", sortable=True),
             dict(name="familias", label="Familias", field="familias", sortable=True, align="left"),
             dict(name="bounce", label="Bounce", field="bounce", sortable=True),
             dict(name="fill_rate", label="Fill rate", field="fill_rate", sortable=True),
@@ -1068,6 +1368,8 @@ class Vista:
             rows=[], row_key="id", selection="single",
             on_select=self._fila_seleccionada).props("dense flat bordered dark no-data-label=\"Sin zonas: elige un "
                                                      "ticker y pulsa Recalcular\"").classes("w-full")
+        self.tabla.add_slot("header-cell-dist_pct", _cabecera_con_ayuda(
+            "Distancia % de r_sup (precio del límite GTC) al precio actual; negativo = por debajo."))
         self.tabla.add_slot("body-cell-rango", "<q-td :props=\"props\">${{ props.row.r_inf.toFixed(2) }} - "
                                                "${{ props.row.r_sup.toFixed(2) }}</q-td>")
         self.tabla.add_slot("body-cell-dist_pct", _slot("((props.value > 0 ? '+' : '') + props.value.toFixed(1) + '%')"))
@@ -1084,6 +1386,10 @@ class Vista:
             self.btn_stop = ui.button("Detener", icon="stop", on_click=self._detener_scan).props("flat")
             self.btn_stop.visible = False
             self.sw_bt_wl = ui.switch("Incluir backtest (lento)", value=False)
+        # Notas visibles (no solo tooltips): el capital NO se reparte entre tickers y el score es solo orden.
+        with ui.element("div").classes("aviso-box w-full").props("data-nota=watchlist"):
+            self.nota_capital = ui.label(nucleo.NOTA_CAPITAL_BATCH).classes("text-caption")
+            self.nota_ranking = ui.label(nota_ranking()).classes("text-caption")
         self.prog = ui.linear_progress(value=0, show_value=False).props("color=amber").classes("w-full")
         self.prog.visible = False
         self.lbl_scan = ui.label("").classes("text-caption txt-muted")
@@ -1094,14 +1400,21 @@ class Vista:
             dict(name="score", label="Score ranking", field="score", sortable=True),
             dict(name="confluencia", label="Confluencia", field="confluencia", sortable=True),
             dict(name="confiabilidad", label="Confiabilidad", field="confiabilidad", sortable=True),
+            dict(name="cobertura", label="Cobertura", field="cobertura", sortable=True),
             dict(name="mejor_zona", label="Mejor zona", field="mejor_zona", align="left"),
-            dict(name="dist_pct", label="Dist. %", field="dist_pct", sortable=True)],
+            dict(name="dist_pct", label=f"{ETIQUETA_DIST_RSUP} %".capitalize(), field="dist_pct", sortable=True)],
             rows=[], row_key="id", pagination=0).props("dense flat bordered dark no-data-label=\"Pulsa Escanear "
                                                        "watchlist.csv\"").classes("w-full cursor-pointer")
         self.tabla_wl.add_slot("body-cell-precio", _slot("'$' + props.value.toFixed(2)"))
         for col in ("score", "confluencia", "confiabilidad"):
             self.tabla_wl.add_slot(f"body-cell-{col}", _slot("props.value.toFixed(1)"))
         self.tabla_wl.add_slot("body-cell-dist_pct", _slot("((props.value > 0 ? '+' : '') + props.value.toFixed(1) + '%')"))
+        self.tabla_wl.add_slot("body-cell-cobertura", _PLANTILLA_COBERTURA)
+        self.tabla_wl.add_slot("header-cell-cobertura", _cabecera_con_ayuda(
+            "Parte del peso de la Confiabilidad que tenía dato (pasa el ratón por una celda para ver qué quedó sin "
+            "dato). Scores con cobertura distinta no son comparables."))
+        self.tabla_wl.add_slot("header-cell-dist_pct", _cabecera_con_ayuda(
+            "Distancia % de r_sup (precio del límite GTC) de la mejor zona al precio actual."))
         self.tabla_wl.on("rowClick", self._click_ranking)
         self.ui.label("Click en una fila para cargar el ticker en la vista Analisis.").classes("text-caption txt-muted")
 
@@ -1175,6 +1488,8 @@ class Vista:
         CACHE[t] = res
         if res.get("errores"):
             ui.notify(f"{t}: {len(res['errores'])} etapa(s) con fallo (ver Avisos).", type="warning")
+        elif res.get("avisos"):
+            ui.notify(f"{t}: analisis completo con {len(res['avisos'])} aviso(s) de datos (ver Avisos).", type="warning")
         else:
             ui.notify(f"{t}: analisis completo.", type="positive")
         self.refrescar()
@@ -1214,7 +1529,9 @@ class Vista:
         filas, fallidos = filas_ranking(resultados)
         self.tabla_wl.rows = filas
         self.tabla_wl.update()
-        self.lbl_scan.text = f"{len(filas)} activos ranqueados" + (f" | sin datos: {', '.join(fallidos)}" if fallidos else "")
+        self.lbl_scan.text = (f"{len(filas)} activos ranqueados" + (f" | sin datos: {', '.join(fallidos)}" if fallidos else "")
+                              + (" | cobertura distinta entre activos: sus scores no son comparables"
+                                 if coberturas_distintas(filas) else ""))
         if fallidos:
             ui.notify(f"Sin datos: {', '.join(fallidos)}", type="warning")
 
@@ -1234,7 +1551,9 @@ class Vista:
         av = anclas_valoracion(res)
         zonas = filtrar_zonas(res.get("zonas") or [], act, av, capital)
         c = res.get("confiabilidad") or {}
-        sub = (f"Confluencia {_fmt(res.get('confluencia_score'))}/100 | Confiabilidad {_fmt(c.get('indice'))}/100")
+        cob = _num(c.get("cobertura"))
+        sub = (f"Confluencia {_fmt(res.get('confluencia_score'))}/100 | Confiabilidad {_fmt(c.get('indice'))}/100"
+               + ("" if cob is None else f" (cobertura {cob * 100:.0f} %)"))
         fig = construir_figura(res.get("df"), res["ticker"], zonas, res.get("precio_actual"), res.get("form4"),
                                res.get("r13f"), av if "valoracion" in act else None, self.nivel_sel, sub)
         self.grafico.update_figure(fig)
@@ -1252,18 +1571,24 @@ class Vista:
             for k in self.tarj:
                 self.tarj[k].text = "n/d"
             self.tarj_cob.text = ""
+            self.tarj_excl.text = ""
+            self.lbl_bt.text = texto_alcance_backtest({})
             with self.avisos:
-                self.ui.label("Elige un ticker y pulsa Recalcular.").classes("txt-muted")
+                self.ui.label(f"{self.ticker}: pulsa Recalcular para analizarlo." if self.ticker
+                              else "Elige un ticker y pulsa Recalcular.").classes("txt-muted")
             return
         d = resumen_tarjetas(res, zonas)
         self.tarj["precio"].text = _fmt(d["precio"], "${:,.2f}")
         self.tarj["confluencia"].text = _fmt(d["confluencia"]) + "/100"
         self.tarj["confiabilidad"].text = _fmt(d["confiabilidad"]) + "/100"
         self.tarj_cob.text = "" if d["cobertura"] is None else f"cobertura {d['cobertura'] * 100:.0f} %"
+        self.tarj_excl.text = f"sin dato: {', '.join(d['sin_dato'])}" if d["sin_dato"] else ""
         self.tarj["promedio"].text = _fmt(d["precio_promedio"], "${:,.2f}")
+        self.lbl_bt.text = d["alcance_backtest"]
         with self.avisos:
             for a in d["avisos"]:
-                self.ui.label(a).classes("txt-aviso" if "ALERTA" in a else "txt-muted text-caption")
+                fuerte = "ALERTA" in a or a in d["avisos_datos"]
+                self.ui.label(a).classes("txt-aviso text-caption" if fuerte else "txt-muted text-caption")
             if d["earnings"] and not d["earnings_alerta"]:
                 self.ui.label(d["earnings"]).classes("txt-muted text-caption")
             for e in d["errores"]:
