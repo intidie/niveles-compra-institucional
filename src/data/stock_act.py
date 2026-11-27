@@ -70,7 +70,11 @@ def consultar_flujo_congreso_stock_act(ticker_symbol, repo_dir=REPO_DIR_DEFAULT)
     (str si ``disponible=False``, None si True), ``compras``, ``ventas``, ``resumen`` (str) y
     ``ultimas_tx`` (lista de hasta 4 dicts). Nunca lanza.
 
-    * Con datos y operaciones: ``disponible=True``, ``pts = 15 * fraccion de compras`` entre las 15 ultimas.
+    * Con datos y operaciones: ``disponible=True``, ``pts = 15 * fraccion de compras`` entre las 15 ultimas
+      (siempre en [0, 15]). ``politico`` sale de ``filer_name`` y ``monto`` de ``amount_range_label``. El
+      de-duplicado solo colapsa la misma operacion (mismo ``id``) presente en varios JSON; antes se fusionaban
+      operaciones distintas del mismo dia (AAPL: 345 compras/336 ventas -> 392/422 reales), por lo que ``compras``,
+      ``ventas`` y la fraccion de las 15 ultimas pueden cambiar respecto a versiones previas.
     * Consultado correctamente y SIN operaciones del ticker: ``disponible=True``, ``pts=0.0`` (cero real).
     * No se pudo consultar (fallo de descarga, carpeta ausente, JSON ilegibles o esquema irreconocible):
       ``disponible=False``, ``pts=None`` y ``motivo``. No es 0 ni un valor neutro: el consumidor debe
@@ -144,19 +148,26 @@ def _evaluar_flujo(ticker_obj, data_dir):
             operaciones.append({
                 "fecha": str(reg.get("transaction_date") or reg.get("tx_date") or reg.get("date")
                              or reg.get("disclosure_date") or "S/F")[:10],
-                "politico": str(reg.get("filer") or reg.get("politician") or reg.get("representative")
-                                or reg.get("name") or "Funcionario"),
+                "politico": str(reg.get("filer_name") or reg.get("filer") or reg.get("politician")
+                                or reg.get("representative") or reg.get("name") or "Funcionario"),
                 "camara": str(reg.get("chamber") or reg.get("source") or reg.get("branch") or ""),
                 "lado": lado,
-                "monto": str(reg.get("amount") or reg.get("range") or reg.get("notional") or ""),
+                "monto": str(reg.get("amount_range_label") or reg.get("amount") or reg.get("range")
+                             or reg.get("notional") or ""),
+                "_id": str(reg.get("id") or ""),
+                "_filer_id": str(reg.get("filer_id") or ""),
+                "_owner": str(reg.get("owner") or ""),
             })
 
     vistos, unicas = set(), []
     for op in operaciones:
-        k = (op["fecha"], op["politico"], op["lado"], op["monto"])
+        # Duplicado verdadero = misma operacion repetida en varios JSON (ticker/, filer/, trades.json): mismo `id`.
+        # Sin `id`: filer (id o nombre), fecha, lado, monto y titular (owner). Operaciones distintas del mismo
+        # dia (otro id/titular/monto) se conservan.
+        k = op["_id"] or (op["_filer_id"] or op["politico"], op["fecha"], op["lado"], op["monto"], op["_owner"])
         if k not in vistos:
             vistos.add(k)
-            unicas.append(op)
+            unicas.append({c: v for c, v in op.items() if not c.startswith("_")})
     unicas.sort(key=lambda x: x["fecha"], reverse=True)
 
     compras = sum(1 for o in unicas if o["lado"] == "COMPRA")

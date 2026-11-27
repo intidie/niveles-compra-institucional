@@ -459,3 +459,49 @@ def test_form4_sin_columna_code_es_cero_real(monkeypatch, ident):
     _parchear_empresas(monkeypatch, {"AAPL": _Empresa([solo_meta])})
     compras, res = se.compras_insiders("AAPL")
     assert compras.empty and res["compras"] == 0 and res["disponible"] is True and res["filings_total"] == 1
+
+
+# ------------------------------------------------------------------ STOCK Act: de-duplicado y campos reales
+def _reg(id_, ticker="AAPL", tipo="Purchase", fecha="2025-03-01", nombre="Ed Case", fid="house_ed_case",
+         label="$1,001 - $15,000", owner="SP"):
+    return {"id": id_, "ticker": ticker, "transaction_type": tipo, "transaction_date": fecha,
+            "filer_id": fid, "filer_name": nombre, "amount_range_label": label, "owner": owner,
+            "chamber": "house"}
+
+
+def test_stock_act_duplicado_real_en_varios_json_se_colapsa(sin_sync, tmp_path):
+    t = _reg("house_1_g0")
+    repo = _repo(tmp_path, {"ticker/AAPL.json": {"ticker": "AAPL", "trades": [t]},
+                            "trades.json": [dict(t)], "filer/house_ed_case.json": {"filer": {}, "trades": [dict(t)]}})
+    r = sa.consultar_flujo_congreso_stock_act("AAPL", repo_dir=repo)
+    assert (r["compras"], r["ventas"]) == (1, 0)
+
+
+def test_stock_act_operaciones_distintas_mismo_dia_se_conservan(sin_sync, tmp_path):
+    ops = [_reg("a"), _reg("b"),                                         # mismo filer/fecha/tipo/monto, ids distintos
+           _reg("c", nombre="Otro", fid="house_otro"),                  # otro filer
+           _reg("d", label="$15,001 - $50,000"),                        # otro monto
+           _reg("e", tipo="Sale (Full)")]
+    repo = _repo(tmp_path, {"ticker/AAPL.json": {"ticker": "AAPL", "trades": ops}, "trades.json": [dict(o) for o in ops]})
+    r = sa.consultar_flujo_congreso_stock_act("AAPL", repo_dir=repo)
+    assert (r["compras"], r["ventas"]) == (4, 1)
+
+
+def test_stock_act_sin_id_usa_clave_compuesta(sin_sync, tmp_path):
+    a = _reg(None)
+    b = _reg(None, owner="JT")
+    repo = _repo(tmp_path, {"trades.json": [a, dict(a), b]})
+    r = sa.consultar_flujo_congreso_stock_act("AAPL", repo_dir=repo)
+    assert r["compras"] == 2
+
+
+def test_stock_act_nombres_y_montos_reales_y_pts_en_rango(sin_sync, tmp_path):
+    ops = [_reg(f"x{i}", tipo="Purchase" if i % 3 else "Sale (Partial)", fecha=f"2025-03-{i + 1:02d}",
+                nombre=f"Persona {i}", label=f"$1,001 - ${i + 2}0,000") for i in range(20)]
+    repo = _repo(tmp_path, {"ticker/AAPL.json": {"ticker": "AAPL", "trades": ops}})
+    r = sa.consultar_flujo_congreso_stock_act("AAPL", repo_dir=repo)
+    assert r["compras"] + r["ventas"] == 20
+    assert r["ultimas_tx"][0]["politico"] == "Persona 19" and r["ultimas_tx"][0]["monto"].startswith("$1,001 - $")
+    assert all(t["politico"] != "Funcionario" and t["monto"] for t in r["ultimas_tx"])
+    assert all(not k.startswith("_") for t in r["ultimas_tx"] for k in t)
+    assert 0 <= r["pts"] <= 15
