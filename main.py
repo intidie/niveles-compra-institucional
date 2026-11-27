@@ -289,8 +289,13 @@ def nombres_componentes(claves) -> str:
 
 
 def analizar_ticker(ticker: str, capital: float, periodo: str = "10y", anios_backtest: int = 5,
-                    backtest: bool = True, sec: bool = True, verbose: bool = True) -> dict:
-    """Pipeline completo de un ticker. Nunca lanza: los fallos de cada etapa quedan en ``errores``."""
+                    backtest: bool = True, sec: bool = True, verbose: bool = True, valor_justo: bool = True) -> dict:
+    """Pipeline completo de un ticker. Nunca lanza: los fallos de cada etapa quedan en ``errores``.
+
+    ``valor_justo`` guarda en ``res["entradas_valoracion"]`` (dict liviano, sin DataFrames) los insumos de la bateria
+    de modelos de ``src/levels/fair_value.py``; la UI recalcula el valor justo con ellos sin red. Es aditivo: no
+    interviene en las zonas, la confluencia ni el score.
+    """
     res = {"ticker": ticker, "fecha": datetime.now().strftime("%Y-%m-%d"), "capital": capital,
            "precio_actual": None, "zonas": [], "errores": [], "avisos": [], "df": None, "form4": None, "r13f": None,
            "r13f_fallidos": [], "r13f_consultados": None, "anios_backtest": None, "n_ordenes": None,
@@ -357,6 +362,14 @@ def analizar_ticker(ticker: str, capital: float, periodo: str = "10y", anios_bac
     except Exception as e:  # noqa: BLE001
         err("valoracion", e)
     res["n_valoracion_en_zona"] = n_val
+
+    # 3b. Entradas del valor justo (15 modelos): se extraen UNA vez; no afectan a zonas ni a scores
+    if valor_justo:
+        try:
+            from src.levels.fair_value import extraer_entradas
+            res["entradas_valoracion"] = extraer_entradas(ticker, tk_obj, df, info).to_dict()
+        except Exception as e:  # noqa: BLE001
+            err("valor_justo", e)
 
     # 4. SEC: Form 4 (P), 13F, STOCK Act. Un dato que NO se pudo consultar es None (se excluye de la
     #    confiabilidad y baja la cobertura); un dato consultado que vale 0 es 0.

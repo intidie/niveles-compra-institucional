@@ -416,7 +416,7 @@ def test_figura_colores_de_series_vienen_de_la_paleta(df_sintetico):
 # Ayuda contextual del panel lateral y construccion completa de la Vista (sin servidor ni red)
 # =====================================================================================================
 def test_ayudas_cubren_los_controles_del_panel():
-    claves = {"ticker", "capital", "backtest", "sec", "recalcular"} | set(ui_mod.TOGGLES)
+    claves = {"ticker", "capital", "backtest", "sec", "recalcular", "valor_justo"} | set(ui_mod.TOGGLES)
     assert claves == set(ui_mod.AYUDAS)
     for k, texto in ui_mod.AYUDAS.items():
         assert 20 <= len(texto) <= 260, k
@@ -443,8 +443,8 @@ def test_vista_construye_tabs_ayudas_y_tema_oscuro(cliente):
     v = ui_mod.Vista()
     v.construir()
     els = list(cliente.elements.values())
-    assert [e.props["name"] for e in els if isinstance(e, ui.tab)] == ["analisis", "watchlist", "modelo"]
-    assert [e.props["label"] for e in els if isinstance(e, ui.tab)] == ["Análisis", "Watchlist", "Modelo"]
+    assert [e.props["name"] for e in els if isinstance(e, ui.tab)] == ["analisis", "valor_justo", "watchlist", "modelo"]
+    assert [e.props["label"] for e in els if isinstance(e, ui.tab)] == ["Análisis", "Valor Justo", "Watchlist", "Modelo"]
     iconos = [e.props["data-ayuda"] for e in els if isinstance(e, ui.icon) and "data-ayuda" in e.props]
     assert sorted(iconos) == sorted(ui_mod.AYUDAS)
     assert len([e for e in els if isinstance(e, ui.tooltip)]) >= len(ui_mod.AYUDAS)
@@ -453,7 +453,7 @@ def test_vista_construye_tabs_ayudas_y_tema_oscuro(cliente):
     assert col.props["dark-page"] == ui_mod.BG_PAGINA and col.props["primary"] == ui_mod.COLORES_QUASAR["primary"]
     assert "color-scheme" in cliente._head_html and ui_mod.BG_POPUP in cliente._head_html
     assert not [e for e in els if isinstance(e, ui.table) and "dark" not in e.props]
-    assert len([e for e in els if isinstance(e, ui.expansion)]) == 9  # pestaña Modelo
+    assert len([e for e in els if isinstance(e, ui.expansion)]) == 10  # pestaña Modelo
 
 
 def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch):
@@ -475,7 +475,8 @@ def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch)
 # =====================================================================================================
 # Pestaña "Modelo": contenido como datos (sin red), fidelidad con el codigo y con docs/METODOLOGIA.md
 # =====================================================================================================
-SECCIONES = ["que_es", "logica", "familias", "grafico", "panel", "metricas", "confiabilidad", "limitaciones", "watchlist"]
+SECCIONES = ["que_es", "logica", "familias", "grafico", "panel", "metricas", "confiabilidad", "limitaciones", "watchlist",
+             "valor_justo"]
 
 
 def _sec(secciones, id_):
@@ -547,7 +548,7 @@ def test_modelo_aviso_no_es_asesoria_visible_en_la_capa_de_render(cliente):
     els = list(cliente.elements.values())
     exp = [e for e in els if isinstance(e, ui.expansion)]
     assert [e.props["data-seccion"] for e in exp] == SECCIONES
-    assert [e.props["model-value"] for e in exp] == [True, True, False, False, False, False, False, True, False]
+    assert [e.props["model-value"] for e in exp] == [True, True, False, False, False, False, False, True, False, False]
     md = " ".join(str(getattr(e, "content", "")) for e in els if isinstance(e, ui.markdown))
     assert "No es asesoría financiera" in md and md.count("No es asesoría financiera") >= 2  # arriba y en Limitaciones
     assert any(isinstance(e, ui.card) and "aviso-card" in e._classes for e in els)  # cuadro de aviso fuera de las expansiones

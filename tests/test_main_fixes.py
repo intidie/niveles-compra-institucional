@@ -29,10 +29,13 @@ def _simular(monkeypatch, df, *, form4="ok", r13=None, r13_error=False, stock=No
     import src.data.market_data as md
     import src.data.sec_edgar as se
     import src.data.stock_act as sa
+    import src.levels.fair_value as fvm
     import src.levels.valuation_floors as vf
     import src.validation.backtest_ranges as br
 
     px = float(df["Close"].iloc[-1])
+    # el valor justo consultaria EDGAR: los tests no usan red
+    monkeypatch.setattr(fvm, "extraer_entradas", lambda t, *a, **k: fvm.EntradasValoracion(ticker=t, precio=px))
     monkeypatch.setattr(md, "descargar_historial", lambda t, p: (object(), df))
     monkeypatch.setattr(md, "obtener_info", lambda tk: {})
     monkeypatch.setattr(md, "verificar_proximidad_earnings", lambda tk: {"alerta_activa": False, "mensaje": "sin alerta"})

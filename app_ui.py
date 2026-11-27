@@ -26,6 +26,10 @@ Modo oscuro: TODOS los colores viven en el bloque PALETA (mas abajo). Plotly (la
 anotaciones), el CSS inyectado (``css_tema``) y ``ui.colors`` los toman de ahi; un test impide literales de color
 fuera de ese bloque y comprueba contraste WCAG >= 4.5:1 en los pares texto/fondo.
 
+Pestana "Valor Justo": bateria de 15 modelos de ``src/levels/fair_value.py`` (implementacion propia "estilo
+InvestingPro"; no replica sus cifras). Recalcula en memoria con ``res["entradas_valoracion"]`` (sin SEC ni yfinance) y es
+aditiva: no toca las zonas ni los pisos de valoracion. Con "Mostrar Valor Justo" dibuja una linea punteada en Analisis.
+
 Pestana "Modelo": ``contenido_modelo()`` devuelve la explicacion como datos (lista de secciones) leyendo pesos y
 parametros del codigo en tiempo de llamada; ``renderizar_modelo()`` solo la dibuja.
 """
@@ -60,6 +64,7 @@ from plotly.subplots import make_subplots  # noqa: E402
 from nicegui import app  # noqa: E402  (importar no abre el servidor; solo registra /health)
 
 import main as nucleo  # noqa: E402  (analizar_ticker, leer_watchlist, ordenar_ranking, asignar_capital)
+from src.levels import fair_value as fv  # noqa: E402  (valor justo: calculo puro y en memoria, sin red)
 from src.reporting.charts import (ETIQUETA_DIST_RSUP, dist_a_r_sup_pct, marcadores_form4,  # noqa: E402
                                   perfil_histograma, trimestres_acumulacion)
 from src.reporting import userdata  # noqa: E402
@@ -69,6 +74,7 @@ RUTA_WATCHLIST = userdata.recurso("watchlist.csv")  # lista de EJEMPLO, solo lec
 RUTA_METODOLOGIA = userdata.recurso("docs", "METODOLOGIA.md")
 MAX_CACHE_NUBE = 3  # tickers con resultado completo (df incluido) retenidos en la nube (512 MB)
 TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
+VJ_RANGO_EJE = (0.3, 3.0)   # el valor justo fuera de [0.3x, 3x] el precio no entra en el rango del eje Y (se anota "fuera de rango")
 TOLERANCIA_VALORACION = (0.98, 1.02)  # igual que main.analizar_ticker (anclas de valoracion en zona)
 
 # ===================================== PALETA (unica fuente de colores) =====================================
@@ -103,6 +109,8 @@ VELA_ALZA, VELA_BAJA = "#2ea043", "#f85149"
 COLOR_13F, COLOR_FORM4, COLOR_VALORACION, COLOR_PRECIO = "#a371f7", "#3fb950", "#e3b341", "#f0f6fc"
 COLOR_HVN, COLOR_BARRA_VP = "#f59e0b", "#404a5a"
 COLORES_NIVEL = {1: "#2ea043", 2: "#00b4d8", 3: "#f59e0b", 4: "#a371f7"}
+COLOR_FAIR_VALUE = "#ff7eb6"            # linea del valor justo (distinta de bandas N1-N4, doradas y precio)
+VJ_ACTIVO, VJ_INACTIVO = "#58a6ff", "#6e7b8f"   # barras de modelos usados / desactivados (el outlier usa AVISO_TXT)
 # =================================== FIN PALETA ===================================
 
 PALETA: dict[str, str] = {k: v for k, v in dict(globals()).items()
@@ -159,6 +167,11 @@ html,body,body.body--dark,.q-layout,.q-page-container,.q-page{background:$BG_PAG
 .ejemplo-box{border-left:3px solid $ACENTO_TXT;background:$BG_PAGINA;padding:8px 12px;border-radius:0 4px 4px 0}
 .aviso-box{border-left:4px solid $AVISO_TXT;background:$BG_PAGINA;padding:8px 12px;border-radius:0 4px 4px 0}
 .aviso-card{border:1px solid $AVISO_TXT !important;border-left-width:5px !important}
+.vj-badge{display:inline-block;padding:2px 12px;border-radius:12px;font-weight:700;font-size:1.05rem}
+.vj-baja{background:$OK_BG;color:$BLANCO}
+.vj-media{background:$AVISO_BG;color:$TXT_SOBRE_AVISO}
+.vj-alta{background:$ERROR_BG;color:$BLANCO}
+.vj-fila{border-bottom:1px solid $GRILLA}
 """)
 
 
@@ -196,6 +209,8 @@ AYUDAS: dict[str, str] = {
                 "columnas salen n/d. Requiere Recalcular.",
     "sec": "Consulta SEC EDGAR (Form 4 y 13F) y STOCK Act. Sin esto no hay marcadores de insiders ni 13F y la "
            "cobertura de la Confiabilidad baja. Requiere Recalcular.",
+    "valor_justo": "Dibuja en el gráfico de Análisis una línea con el valor justo consolidado de los modelos activos "
+                   "(pestaña Valor Justo). Es una estimación con supuestos, no un precio objetivo.",
     "recalcular": "Descarga y calcula todo de nuevo para el ticker. Solo hace falta con un ticker nuevo o al cambiar "
                   "Backtest/SEC; capital y familias se actualizan solos.",
 }
@@ -394,7 +409,10 @@ def filas_ranking(resultados: list[dict]) -> tuple[list[dict], list[str]]:
             "confiabilidad": _num(conf.get("indice")),
             "cobertura": None if cob is None else cob * 100.0, "sin_dato": ", ".join(nombres_sin_dato(r)),
             "mejor_zona": f"${z['r_inf']:.2f} - ${z['r_sup']:.2f}" if z else "n/d",
-            "dist_pct": distancia_zona(z, r.get("precio_actual")) if z else None})
+            "dist_pct": distancia_zona(z, r.get("precio_actual")) if z else None,
+            "upside": _num((r.get("valor_justo") or {}).get("upside_pct")),
+            "upside_nota": nota_soporte((r.get("valor_justo") or {}).get("incertidumbre"),
+                                        (r.get("valor_justo") or {}).get("n_usados")) if r.get("valor_justo") else None})
     return filas, fallidos
 
 
@@ -447,8 +465,13 @@ def _figura_vacia(titulo: str, mensaje: str) -> go.Figure:
 def construir_figura(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | None = None,
                      precio_actual: float | None = None, form4: pd.DataFrame | None = None,
                      r13f: pd.DataFrame | None = None, anclas_val: list[dict] | None = None,
-                     nivel_seleccionado: int | None = None, subtitulo: str | None = None) -> go.Figure:
-    """Grafico doble (velas + bandas + Form 4 / 13F | Volume Profile) con eje Y compartido, ~75/25."""
+                     nivel_seleccionado: int | None = None, subtitulo: str | None = None,
+                     valor_justo: dict | None = None) -> go.Figure:
+    """Grafico doble (velas + bandas + Form 4 / 13F | Volume Profile) con eje Y compartido, ~75/25.
+
+    ``valor_justo`` (dict de ``fair_value.agregar_valor_justo``) dibuja una linea horizontal punteada con la etiqueta
+    ``Fair Value: $XXX (+XX% Upside)``; es independiente de las bandas N1-N4 y de las lineas doradas de valoracion.
+    """
     base = f"{ticker} - Mapa de niveles institucionales" if ticker and ticker != "-" else "Mapa de niveles institucionales"
     titulo = base + (f"  |  {subtitulo}" if subtitulo else "")
     if df is None or df.empty or not {"Open", "High", "Low", "Close", "Volume"}.issubset(df.columns):
@@ -528,6 +551,30 @@ def construir_figura(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
     for col in (1, 2):
         fig.add_hline(y=px, line=dict(color=COLOR_PRECIO, width=1.1), opacity=0.8, row=1, col=col)
 
+    # Valor justo consolidado (linea discontinua rosa, etiqueta arriba a la derecha: las bandas etiquetan arriba a la
+    # izquierda y las anclas de valoracion abajo a la derecha)
+    vj = _num((valor_justo or {}).get("fair_value"))
+    vj_en_eje = vj is not None and vj > 0 and VJ_RANGO_EJE[0] * px <= vj <= VJ_RANGO_EJE[1] * px
+    if vj is not None and vj > 0:
+        etiqueta_vj = etiqueta_fair_value(vj, (valor_justo or {}).get("upside_pct"),
+                                          nota_soporte((valor_justo or {}).get("incertidumbre"),
+                                                       (valor_justo or {}).get("n_usados")))
+        if vj_en_eje:
+            fig.add_hline(y=vj, line=dict(color=COLOR_FAIR_VALUE, width=1.8, dash="dash"), row=1, col=1,
+                          annotation_text=etiqueta_vj, annotation_position="top right",
+                          annotation_font=dict(color=COLOR_FAIR_VALUE, size=12), annotation_bgcolor=BG_ETIQUETA,
+                          annotation_bordercolor=COLOR_FAIR_VALUE)
+        else:  # linea fuera de la escala razonable: solo una nota en el borde, sin deformar el eje de precios
+            arriba = vj > px
+            fig.add_annotation(text=f"{etiqueta_vj} {'▲' if arriba else '▼'} fuera de rango del eje", xref="x domain",
+                               yref="y domain", x=1.0, y=0.98 if arriba else 0.02, xanchor="right",
+                               yanchor="top" if arriba else "bottom", showarrow=False, row=1, col=1,
+                               font=dict(color=COLOR_FAIR_VALUE, size=12), bgcolor=BG_ETIQUETA,
+                               bordercolor=COLOR_FAIR_VALUE)
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines", name="Valor justo (modelos)",
+                                 line=dict(color=COLOR_FAIR_VALUE, width=1.8, dash="dash"),
+                                 hoverlabel=_hoverlabel(COLOR_FAIR_VALUE)), row=1, col=1)
+
     # Volume Profile horizontal (HVN >= 70 % del maximo resaltados, igual criterio que charts.py)
     centros, vol, paso = perfil_histograma(d)
     if len(centros):
@@ -537,6 +584,8 @@ def construir_figura(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
                              hovertemplate="%{y:$,.2f}<br>Vol. %{x:,.0f}<extra>VP</extra>"), row=1, col=2)
 
     y_vals = [rango_y[0], rango_y[1], px] + [v for z in zonas for v in (z["r_inf"], z["r_sup"])]
+    if vj_en_eje:
+        y_vals.append(vj)
     fig.update_layout(**_layout_tema(720), hovermode="x unified",
                       title=dict(text=titulo, x=0.01, font=dict(size=15, color=TXT)),
                       margin=dict(l=60, r=20, t=60, b=40), bargap=0, xaxis_rangeslider_visible=False)
@@ -548,6 +597,113 @@ def construir_figura(df: pd.DataFrame | None, ticker: str, zonas: list[dict] | N
     fig.update_yaxes(gridcolor=GRILLA, linecolor=BORDE, tickfont=dict(color=TXT), tickprefix="$", tickformat=",.0f",
                      range=[min(y_vals) * 0.95, max(y_vals) * 1.04], row=1, col=1)
     fig.update_yaxes(matches="y", showticklabels=False, row=1, col=2)
+    return fig
+
+
+# --- Valor justo: logica pura (sin NiceGUI ni red) ---------------------------------------------------------
+VJ_DEBOUNCE_S = 0.25   # espera tras mover un slider antes de recalcular (evita recalcular en cada pixel)
+VJ_SLIDERS = {"wacc": (4.0, 16.0, 0.1), "g": (0.0, 5.0, 0.1), "mos": (0.0, 60.0, 1.0)}   # (min, max, paso) en %
+ESTADOS_MODELO = ("activo", "outlier", "desactivado", "no_aplica")
+NOMBRES_ESTADO = {"activo": "Activo", "outlier": "Outlier", "desactivado": "Desactivado por usuario",
+                  "no_aplica": "No aplica"}
+
+
+def nota_soporte(incertidumbre: str | None, n_usados: int | None) -> str | None:
+    """Nota de soporte debil del consolidado: ``n=2`` con menos de ``MIN_MODELOS_CONFIABLE`` modelos usados, ``incert. Alta``
+    si la incertidumbre es Alta; None si el soporte es suficiente (o no se conoce)."""
+    if n_usados is not None and n_usados < fv.MIN_MODELOS_CONFIABLE:
+        return f"n={n_usados}"
+    return "incert. Alta" if incertidumbre == "Alta" else None
+
+
+def etiqueta_fair_value(valor: float, upside_pct: float | None, nota: str | None = None) -> str:
+    """Etiqueta de la linea: ``Fair Value: $XXX (+XX% Upside)`` (o ``-XX%``) y, con soporte debil, `` · incert. Alta`` (o
+    `` · n=2``); sin precio actual no hay porcentaje."""
+    base = (f"Fair Value: ${valor:,.2f}" if _num(upside_pct) is None
+            else f"Fair Value: ${valor:,.2f} ({upside_pct:+.0f}% Upside)")
+    return base + (f" · {nota}" if nota else "")
+
+
+def estado_modelo(modelo: dict, agregado: dict, activo_usuario: bool = True) -> tuple[str, str]:
+    """(clave, texto) del estado de un modelo: no_aplica > desactivado > outlier > activo (el texto lleva el motivo)."""
+    if not modelo.get("aplicable"):
+        return "no_aplica", f"No aplica: {modelo.get('motivo_exclusion') or 'sin datos'}"
+    if not activo_usuario:
+        return "desactivado", NOMBRES_ESTADO["desactivado"]
+    if modelo["id"] in (agregado or {}).get("modelos_outlier", []):
+        return "outlier", "Outlier: excluido del promedio (filtro IQR)"
+    return "activo", NOMBRES_ESTADO["activo"]
+
+
+def ids_por_familia(familia: str) -> list[str]:
+    return [i for i, _, f in fv.MODELOS if f == familia]
+
+
+def valor_justo_de_entradas(entradas: Any, params: "fv.ParametrosValoracion | None" = None,
+                            activos: dict[str, bool] | None = None, precio: float | None = None) -> dict | None:
+    """Agregado de valor justo (con ``modelos``) desde las entradas livianas; None si no hay entradas. Sin red."""
+    if not entradas:
+        return None
+    e = entradas if isinstance(entradas, fv.EntradasValoracion) else fv.EntradasValoracion.desde_dict(entradas)
+    p = params or fv.ParametrosValoracion()
+    ids = None if activos is None else [i for i, v in activos.items() if v]
+    return fv.valor_justo(e, p, ids, precio if precio is not None else e.precio)
+
+
+def resumen_valor_justo(res: dict, params: "fv.ParametrosValoracion | None" = None) -> dict | None:
+    """Resumen liviano (fair_value, upside, incertidumbre) para el ranking de la Watchlist; None sin entradas."""
+    agg = valor_justo_de_entradas(res.get("entradas_valoracion"), params, None, res.get("precio_actual"))
+    if agg is None:
+        return None
+    return {k: agg.get(k) for k in ("fair_value", "upside_pct", "incertidumbre", "n_usados", "cv")}
+
+
+def construir_figura_valor_justo(modelos: list[dict] | None, agregado: dict | None, precio: float | None,
+                                 activos: dict[str, bool] | None = None) -> go.Figure:
+    """Barras horizontales por modelo (usado / outlier / desactivado / no aplica) con lineas del valor justo y del precio."""
+    if not modelos:
+        return _figura_vacia("Valor justo por modelo", "Pulsa Recalcular para obtener las entradas de valoración")
+    agregado = agregado or {}
+    colores = {"activo": VJ_ACTIVO, "outlier": AVISO_TXT, "desactivado": VJ_INACTIVO, "no_aplica": MUTED}
+    grupos: dict[str, list[dict]] = {k: [] for k in ESTADOS_MODELO}
+    for m in modelos:
+        clave, texto = estado_modelo(m, agregado, True if activos is None else bool(activos.get(m["id"], True)))
+        grupos[clave].append({**m, "estado": texto})
+    fig = go.Figure()
+    for clave in ESTADOS_MODELO:
+        g = grupos[clave]
+        if not g:
+            continue
+        na = clave == "no_aplica"
+        xs = [0.0 if na else float(m["precio_estimado"]) for m in g]
+        fig.add_trace(go.Bar(
+            y=[m["nombre"] for m in g], x=xs, orientation="h", name=NOMBRES_ESTADO[clave] + f" ({len(g)})",
+            marker=dict(color=colores[clave], line=dict(color=BORDE, width=0.5)),
+            text=["No aplica" if na else f"${x:,.2f}" for x in xs], textposition="outside", cliponaxis=False,
+            textfont=dict(color=MUTED if na else TXT, size=11),
+            customdata=[[m["familia"], m["estado"]] for m in g], hoverlabel=_hoverlabel(colores[clave]),
+            hovertemplate="<b>%{y}</b><br>Familia: %{customdata[0]}<br>%{customdata[1]}"
+                          + ("" if na else "<br>Precio estimado: %{x:$,.2f}") + "<extra></extra>"))
+    fv_px, px = _num(agregado.get("fair_value")), _num(precio)
+    xs_all = [m["precio_estimado"] for m in modelos if m.get("precio_estimado")] + [v for v in (fv_px, px) if v]
+    x_max = max(xs_all) * 1.22 if xs_all else 1.0
+    if fv_px:
+        fig.add_vline(x=fv_px, line=dict(color=COLOR_FAIR_VALUE, width=2, dash="dash"),
+                      annotation_text=f"Valor justo ${fv_px:,.2f}", annotation_position="top",
+                      annotation_font=dict(color=COLOR_FAIR_VALUE, size=11), annotation_bgcolor=BG_ETIQUETA,
+                      annotation_bordercolor=COLOR_FAIR_VALUE)
+    if px:
+        fig.add_vline(x=px, line=dict(color=COLOR_PRECIO, width=1.5), annotation_text=f"Precio ${px:,.2f}",
+                      annotation_position="bottom", annotation_font=dict(color=COLOR_PRECIO, size=11),
+                      annotation_bgcolor=BG_ETIQUETA, annotation_bordercolor=BORDE)
+    fig.update_layout(**_layout_tema(max(420, 34 * len(modelos) + 130)), barmode="overlay", bargap=0.35,
+                      margin=dict(l=150, r=40, t=100, b=40), hovermode="closest")  # el titulo es una etiqueta de la pagina
+    # leyenda por encima de las etiquetas de las lineas verticales (que van pegadas al borde superior del trazado)
+    fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.09, x=0.0))
+    fig.update_xaxes(gridcolor=GRILLA, linecolor=BORDE, tickfont=dict(color=TXT), tickprefix="$", tickformat=",.0f",
+                     range=[0, x_max])
+    fig.update_yaxes(autorange="reversed", gridcolor=GRILLA, linecolor=BORDE, tickfont=dict(color=TXT),
+                     categoryorder="array", categoryarray=[m["nombre"] for m in modelos])
     return fig
 
 
@@ -570,13 +726,16 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-async def calcular_ticker(ticker: str, capital: float, backtest: bool = True, sec: bool = True) -> dict:
+async def calcular_ticker(ticker: str, capital: float, backtest: bool = True, sec: bool = True,
+                          valor_justo: bool = True) -> dict:
     """Corre ``main.analizar_ticker`` fuera del hilo de eventos (proceso aparte; hilo si el pool no existe).
 
     El backtest es Python puro con GIL, por eso en local se prefiere ``run.cpu_bound``. En la nube (512 MB) un pool de
     procesos duplicaria la memoria: se usa un solo hilo (``asyncio.to_thread``).
     """
     kw = dict(backtest=backtest, sec=sec, verbose=False)
+    if not valor_justo:  # solo se pasa si se desactiva (por defecto analizar_ticker ya extrae las entradas)
+        kw["valor_justo"] = False
     if userdata.en_nube():
         return await asyncio.to_thread(nucleo.analizar_ticker, ticker, capital, **kw)
     from nicegui import run
@@ -924,6 +1083,130 @@ def _seccion_logica(p: dict[str, Any]) -> dict:
         {"aviso": "Material educativo; no es asesoría financiera."}]
     return {"id": "logica", "titulo": "2. La lógica detrás: cómo y por qué (en simple)", "icono": "psychology",
             "abierta": True, "parrafos": par}
+
+
+def _ejemplo_valor_justo() -> dict[str, Any]:
+    """Ejemplo ILUSTRATIVO calculado con el codigo real de ``fair_value`` (todas las cifras de entrada son inventadas)."""
+    e = fv.EntradasValoracion(precio=100.0, acciones_diluidas=10.0, fcf_ltm=100.0, eps_ltm=8.0, bvps=60.0, caja=0.0,
+                              deuda_total=0.0)
+    p = fv.ParametrosValoracion(wacc=0.10, pe_objetivo=15.0)
+    ms = {m["id"]: m for m in fv.calcular_modelos(e, p)}
+    ids = ("dcf_5y_fcf", "pe", "graham")
+    agg = fv.agregar_valor_justo([ms[i] for i in ids], None, fv.MARGEN_SEGURIDAD_DEFECTO, e.precio)
+    return {"entradas": e, "params": p, "dcf": ms["dcf_5y_fcf"]["precio_estimado"], "pe": ms["pe"]["precio_estimado"],
+            "graham": ms["graham"]["precio_estimado"], "agg": agg}
+
+
+def _seccion_valor_justo() -> dict:
+    """Seccion "Valor justo" de la pestana Modelo: lenguaje simple; todas las constantes se leen de ``fair_value``."""
+    ej = _ejemplo_valor_justo()
+    e, p, agg = ej["entradas"], ej["params"], ej["agg"]
+    mos = fv.MARGEN_SEGURIDAD_DEFECTO
+    n_fam = {f: sum(1 for m in fv.MODELOS if m[2] == f) for f in fv.FAMILIAS}
+    rg = fv.RANGOS_MULTIPLOS
+    par: list[Any] = [
+        {"aviso": fv.AVISO},
+        "**Qué es.** Es una estimación del precio «razonable» de una acción según lo que gana, lo que debe y lo que "
+        "tiene en caja. No usa el gráfico de precios: usa los estados financieros (SEC EDGAR, 10-K y 10-Q). La app calcula "
+        f"{len(fv.MODELOS)} modelos distintos y los consolida en **un solo número** (el promedio de los modelos válidos).",
+        "### Las familias de modelos, con un ejemplo corto",
+        f"Empresa **inventada** con precio {_es(e.precio, 0)} USD, {_es(e.acciones_diluidas, 0)} acciones, flujo de caja "
+        f"libre (FCF) de {_es(e.fcf_ltm, 0)}, ganancia por acción (EPS) de {_es(e.eps_ltm, 0)} y valor contable por acción "
+        f"de {_es(e.bvps, 0)}:",
+        {"lista": [
+            f"**DCF** ({n_fam['DCF']} modelos: 5 y 10 años sobre FCF, EBITDA e ingresos). *Analogía:* cuánto pagarías hoy por "
+            f"un negocio que te va a dar flujos de caja durante años, descontados porque un dólar de mañana vale menos que "
+            f"uno de hoy. Con tasa de descuento (WACC) de {_pct(p.wacc, 0)} y crecimiento de largo plazo g de "
+            f"{_pct(p.g)}, el DCF a 5 años da **{_es(ej['dcf'], 1)} USD** por acción.",
+            f"**Múltiplos** ({n_fam['Múltiplos']} modelos: P/E, EV/EBITDA, EV/Ingresos, P/B, P/FCF). *Analogía:* tasar una "
+            f"casa por lo que se paga por casas parecidas. Con un P/E objetivo de {_es(p.pe_objetivo, 0)} (en la app es "
+            f"la mediana histórica propia), el valor es EPS x P/E = **{_es(ej['pe'], 1)} USD**.",
+            f"**Dividendos** ({n_fam['Dividendos']} modelo: DDM de Gordon). Valora la acción por los dividendos que "
+            f"paga. Solo aplica a empresas que pagan un dividendo relevante.",
+            f"**Valor** ({n_fam['Valor']} modelos: EPV de Greenwald, Graham y Lynch). Son reglas clásicas, pero NO son "
+            f"«conservadoras» en general: tienen sesgos estructurales. En empresas con ROE alto y muchas recompras suelen "
+            f"dar muy por debajo del precio (Graham y EPV subestiman negocios con poco capital contable; Lynch usa el "
+            f"crecimiento histórico y ignora los dividendos), y por eso Graham no aplica con P/B mayor que "
+            f"{_es(fv.GRAHAM_PB_MAX, 0)}. Ejemplo de Graham: raíz de {_es(fv.GRAHAM_FACTOR, 1)} x EPS x valor contable = "
+            f"**{_es(ej['graham'], 1)} USD**."]},
+        "### El valor justo consolidado y el margen de seguridad",
+        "**Cada familia ve algo distinto.** Los botones «Solo DCF» y «Solo Múltiplos» lo muestran: los DCF dependen de "
+        "tus supuestos de futuro (WACC, g, crecimiento) y los múltiplos de lo que el mercado pagó antes, así que pueden "
+        "diferir mucho para la misma empresa. Debajo del consolidado la pestaña muestra la mediana, las submedias por "
+        "familia y un promedio que iguala el peso de cada familia: son información complementaria, el consolidado sigue "
+        "siendo el promedio simple.",
+        {"ejemplo": f"Con esos tres números (DCF, P/E y Graham) el promedio es **{_es(agg['fair_value'], 1)} USD**. "
+                    f"El **margen de seguridad** es un descuento voluntario por prudencia (por defecto {_pct(mos, 0)}): "
+                    f"{_es(agg['fair_value'], 1)} x (1 - {_es(mos, 2)}) = **{_es(agg['margin_of_safety_price'], 1)} USD**. "
+                    f"Es el precio al que el modelo todavía deja ese colchón por si los supuestos fallan."},
+        f"**Potencial (Upside):** (valor justo - precio) / precio. Positivo = el precio está por debajo del valor "
+        f"estimado; negativo = por encima. No es una predicción de que el precio converja.",
+        "### Incertidumbre (CV) y outliers",
+        f"La **incertidumbre** mide cuánto discrepan los modelos entre sí: es el coeficiente de variación (CV = desviación "
+        f"estándar / promedio de los modelos usados). **Baja** si el CV es menor que {_es(fv.CV_BAJO, 2)}, **Media** entre "
+        f"{_es(fv.CV_BAJO, 2)} y {_es(fv.CV_ALTO, 2)} y **Alta** si supera {_es(fv.CV_ALTO, 2)} o si quedan menos de "
+        f"{fv.MIN_MODELOS_CONFIABLE} modelos. Una incertidumbre alta no es un fallo: indica que los modelos no se ponen de "
+        f"acuerdo y que el promedio vale poco.",
+        f"**Outliers:** con {fv.MIN_MODELOS_IQR} o más modelos válidos se descartan los que quedan fuera de "
+        f"[Q1 - {_es(fv.IQR_K, 1)} x IQR, Q3 + {_es(fv.IQR_K, 1)} x IQR] (rango intercuartílico). Se marcan «Outlier». "
+        f"Un outlier queda excluido mientras haya {fv.MIN_MODELOS_IQR} o más modelos válidos; con menos ya no se filtra. "
+        f"Puedes desactivar cualquier modelo con su casilla (si desactivas otros hasta quedar con menos de "
+        f"{fv.MIN_MODELOS_IQR}, el filtro deja de aplicarse y el outlier vuelve a contar).",
+        "### No es lo mismo que los niveles de compra técnicos (y cómo se complementan)",
+        "Los **niveles técnicos** (zonas N1-N4) responden *dónde* dejar órdenes límite según estructuras de precio y "
+        "volumen. El **valor justo** responde *cuánto parece valer* el negocio según sus cifras. Son preguntas "
+        "distintas y no se mezclan en ningún cálculo: el valor justo es aditivo y no mueve las zonas.",
+        {"tabla": {"columnas": ["Si ocurre...", "Lectura posible"],
+                   "filas": [["Una zona N1 cae por debajo del valor justo con margen",
+                              "Coinciden la estructura de precio y la valoración: más respaldo para dejar la orden ahí."],
+                             ["Una zona N1 cae por encima del valor justo",
+                              "La estructura de precio y la valoración discrepan: conviene revisar los supuestos."],
+                             ["El precio está muy por encima del valor justo",
+                              "Las zonas técnicas pueden quedar lejos; no implica que el precio vaya a bajar."]]}},
+        "### Limitaciones, en corto",
+        {"lista": [
+            f"**Sensibilidad:** el DCF cambia mucho con pequeños cambios del WACC ({_pct(fv.WACC_MIN, 0)} a "
+            f"{_pct(fv.WACC_MAX, 0)} en el cálculo automático) y de g ({_pct(fv.CRECIMIENTO_TERMINAL_DEFECTO)} por defecto). "
+            f"Por eso la pestaña tiene sliders para probarlo.",
+            "**El valor terminal domina el DCF:** la mayor parte del valor sale de los flujos después del último año "
+            "proyectado, que es lo más incierto.",
+            f"**Datos LTM (últimos 12 meses) con rezago:** vienen de 10-K/10-Q, que se publican semanas después del cierre. "
+            f"El crecimiento proyectado parte de la mitad del histórico (tope {_pct(fv.CRECIMIENTO_TOPE, 0)}) y el margen "
+            f"FCF objetivo tiene tope de {_pct(fv.MARGEN_FCF_TOPE, 0)}.",
+            f"**Múltiplos acotados:** el múltiplo objetivo es la mediana histórica propia dentro de rangos fijos "
+            f"(P/E {_es(rg['pe'][0], 0)}-{_es(rg['pe'][1], 0)}, EV/EBITDA {_es(rg['ev_ebitda'][0], 0)}-"
+            f"{_es(rg['ev_ebitda'][1], 0)}, EV/Ingresos {_es(rg['ev_revenue'][0], 1)}-{_es(rg['ev_revenue'][1], 0)}, P/B "
+            f"{_es(rg['pb'][0], 1)}-{_es(rg['pb'][1], 0)}, P/FCF {_es(rg['p_fcf'][0], 0)}-{_es(rg['p_fcf'][1], 0)}): en "
+            f"empresas de crecimiento muy alto subestiman lo que el mercado pagó históricamente.",
+            "**Sectores donde no aplica:** bancos y aseguradoras (EBITDA y FCF no significan lo mismo; solo se usan P/E, "
+            "P/B, DDM, Graham y Lynch), empresas con pérdidas (varios modelos se marcan «No aplica» con su motivo) y "
+            f"dividendos simbólicos (menos de {_pct(fv.DDM_RENDIMIENTO_MIN, 0)} de rendimiento).",
+            "**Tasas de referencia:** la tasa libre de riesgo y la prima de riesgo son parámetros por defecto "
+            f"({_pct(fv.RF_DEFECTO, 2)} y {_pct(fv.ERP_DEFECTO, 1)}), no datos de mercado en vivo.",
+            f"**Los modelos no son independientes:** los 6 DCF comparten WACC, g y crecimiento, y Graham, Lynch, P/E y P/B "
+            f"salen de EPS y valor contable. N modelos no equivalen a N confirmaciones; por eso la incertidumbre «Baja» "
+            f"exige modelos de al menos {fv.MIN_FAMILIAS_BAJA} grupos de familias.",
+            f"**Ciclos y commodities:** un flujo muy variable con subidas y bajadas se normaliza (media de los últimos "
+            f"{fv.N_NORMALIZACION} años, crecimiento inicial = g) en vez de extrapolar un valle o un pico; también puede "
+            f"confundir un hecho puntual (un pago de impuestos extraordinario) con un ciclo. Y con menos de "
+            f"{fv.MIN_ANIOS_FCF} años de flujo positivo el DCF de FCF no aplica.",
+            "**Sectores no cubiertos:** REITs y utilities no se tratan con FFO ni con su estructura regulada; bancos y "
+            "aseguradoras usan solo los modelos de resultados.",
+            "**Qué cuenta como flujo, caja y deuda:** el FCF suma la remuneración en acciones (SBC) como si fuera efectivo "
+            "(del orden del 6 al 10 % del FCF en las grandes tecnológicas); la deuda excluye arrendamientos y la caja solo "
+            "incluye inversiones corrientes (las no corrientes no cuentan); en el DCF de FCF se suman los intereses "
+            "después de impuestos al FCF y se resta la deuda aparte.",
+            f"**Topes por construcción:** cuando un tope está activo (múltiplo, crecimiento, margen, beta o WACC acotados) el "
+            f"resultado de ese modelo depende del tope y no solo de los datos: la pestaña lo marca como «tope activo». Los "
+            f"DCF descuentan a fin de año, convención conservadora que resta alrededor de un 5 % del valor.",
+            f"**Poco soporte:** con menos de {fv.MIN_MODELOS_CONFIABLE} modelos, o sin DCF, el consolidado tiene soporte "
+            f"mínimo; la línea del gráfico y el potencial lo indican («incert. Alta» o «n=2»).",
+            f"**Otros DCF del proyecto:** los pisos de valoración de los niveles técnicos usan un DCF más conservador (tope "
+            f"de crecimiento inicial y tasa fijos, ver la sección 3) que el de esta pestaña (tope {_pct(fv.CRECIMIENTO_TOPE, 0)} "
+            f"y WACC por CAPM): conviven con supuestos distintos y no deben compararse como si fueran el mismo.",
+            "**No es una predicción ni un precio objetivo**, y no se auditó con backtesting como los niveles técnicos."]}]
+    return {"id": "valor_justo", "titulo": "10. Valor justo: qué es, cómo se calcula y cómo se complementa",
+            "icono": "balance", "abierta": False, "parrafos": par}
 
 
 def contenido_modelo() -> list[dict]:
@@ -1279,6 +1562,7 @@ def contenido_modelo() -> list[dict]:
         "**Dónde se guarda:** en un archivo de tu equipo (carpeta de datos de la aplicación), no en el repositorio. En "
         "un servidor en la nube (por ejemplo Render, plan gratuito) el disco es efímero: la lista personalizada no "
         "persiste entre reinicios."]})
+    secciones.append(_seccion_valor_justo())
     return secciones
 
 
@@ -1390,6 +1674,19 @@ class Vista:
         self.activos: dict[str, bool] = {k: True for k in TOGGLES}
         self.ocupado = False
         self.detener = False
+        # Valor justo: TODO el estado vive aqui (la entrada liviana res["entradas_valoracion"] se cachea; sin red)
+        self.vj_params = fv.ParametrosValoracion()
+        self.vj_activos: dict[str, bool] = {i: True for i in fv.IDS_MODELOS}
+        self.vj_ticker: str | None = None           # ticker y dict de entradas (por identidad) ya cargados
+        self.vj_dict: dict | None = None
+        self.vj_gen = 0                             # sube cada vez que cambian las entradas (clave del cache de modelos)
+        self.vj_entradas: fv.EntradasValoracion | None = None
+        self.vj_modelos_cache: tuple[tuple, list[dict]] | None = None
+        self.vj_agg: dict | None = None
+        self.vj_wacc_tocado = False
+        self._vj_silencio = False                   # True mientras el codigo (no el usuario) mueve controles
+        self._vj_seq = 0                            # numero de version del debounce de los sliders
+        self.vj_rows: dict[str, dict] = {}
 
     # ---- construccion
     def _ayuda(self, clave: str) -> None:
@@ -1425,6 +1722,9 @@ class Vista:
                     self._ayuda(clave)
             ui.separator()
             with ui.row().classes("w-full items-center no-wrap justify-between"):
+                self.sw_vj = ui.switch("Mostrar Valor Justo", value=False, on_change=lambda e: self._toggle_vj(e.value))
+                self._ayuda("valor_justo")
+            with ui.row().classes("w-full items-center no-wrap justify-between"):
                 self.sw_bt = ui.switch("Backtest (lento)", value=True)
                 self._ayuda("backtest")
             with ui.row().classes("w-full items-center no-wrap justify-between"):
@@ -1436,11 +1736,14 @@ class Vista:
         self.tabs = ui.tabs().classes("w-full")
         with self.tabs:
             t_an = ui.tab("analisis", label="Análisis")
+            t_vj = ui.tab("valor_justo", label="Valor Justo")
             t_wl = ui.tab("watchlist", label="Watchlist")
             t_md = ui.tab("modelo", label="Modelo")
         with ui.tab_panels(self.tabs, value=t_an).classes("w-full bg-transparent"):
             with ui.tab_panel(t_an):
                 self._panel_analisis()
+            with ui.tab_panel(t_vj):
+                self._panel_valor_justo()
             with ui.tab_panel(t_wl):
                 self._panel_watchlist()
             with ui.tab_panel(t_md):
@@ -1501,6 +1804,360 @@ class Vista:
         self.tabla.add_slot("body-cell-acciones", _slot("props.value.toFixed(4)"))
         self.tabla.add_slot("body-cell-entrada", _slot("'$' + props.value.toFixed(2)"))
 
+    def _panel_valor_justo(self) -> None:
+        ui = self.ui
+        with ui.element("div").classes("aviso-box w-full").props("data-nota=valor-justo"):
+            ui.label(fv.AVISO).classes("text-caption")
+        self.vj_msg = ui.label("").classes("txt-muted").props("data-vj=mensaje")
+        with ui.row().classes("w-full gap-3 items-stretch no-wrap overflow-auto"):
+            self.vj_kpi = {}
+            for clave, titulo in (("precio", "Precio actual"), ("fair", "Valor justo consolidado"),
+                                  ("potencial", "Potencial (upside)"), ("incert", "Incertidumbre"),
+                                  ("mos", "Precio con margen de seguridad")):
+                with ui.card().classes("min-w-[170px] p-3").props(f"data-kpi={clave}"):
+                    ui.label(titulo).classes("text-caption txt-muted")
+                    self.vj_kpi[clave] = ui.label("n/d").classes("text-h6")
+            self.vj_kpi_detalle = ui.label("").classes("text-caption txt-muted").style("align-self:center")
+        self.vj_comp = ui.column().classes("gap-0 w-full").props("data-vj=complementarias")
+        with ui.row().classes("w-full gap-4 items-start no-wrap"):
+            with ui.column().classes("gap-1").style("min-width: 430px; max-width: 470px"):
+                ui.label("Modelos (marca los que quieres usar)").classes("text-subtitle2")
+                with ui.row().classes("gap-1"):
+                    ui.button("Seleccionar todos", on_click=lambda: self._vj_seleccionar(list(fv.IDS_MODELOS))) \
+                        .props("dense outline size=sm data-accion=vj-todos")
+                    ui.button("Solo DCF", on_click=lambda: self._vj_seleccionar(ids_por_familia("DCF"))) \
+                        .props("dense outline size=sm data-accion=vj-dcf")
+                    ui.button("Solo Múltiplos", on_click=lambda: self._vj_seleccionar(ids_por_familia("Múltiplos"))) \
+                        .props("dense outline size=sm data-accion=vj-multiplos")
+                ui.label("Modelos desactivados se mantienen al cambiar de ticker. «Solo DCF» y «Solo Múltiplos» muestran "
+                         "visiones distintas del mismo negocio y pueden diferir mucho; «Seleccionar todos» los reactiva.") \
+                    .classes("text-caption txt-muted").props("data-vj=nota-seleccion")
+                for id_, nombre, familia in fv.MODELOS:
+                    with ui.column().classes("vj-fila w-full gap-0").props(f"data-modelo={id_}"):
+                        with ui.row().classes("w-full items-center no-wrap justify-between"):
+                            chk = ui.checkbox(f"{nombre}", value=True,
+                                              on_change=lambda e, k=id_: self._vj_toggle_modelo(k, e.value)).props("dense")
+                            px = ui.label("n/d").classes("text-body2")
+                        est = ui.label("").classes("text-caption txt-muted").style("white-space: normal")
+                        tope = ui.label("").classes("text-caption txt-aviso").style("white-space: normal")
+                    self.vj_rows[id_] = {"chk": chk, "precio": px, "estado": est, "tope": tope}
+            with ui.column().classes("grow gap-2").style("min-width: 0"):
+                ui.label("Valor justo por modelo (USD por acción)").classes("text-subtitle2")
+                self.vj_grafico = ui.plotly(construir_figura_valor_justo(None, None, None)).classes("w-full")
+                ui.label("Supuestos (mueve los sliders para recalcular en vivo; no consultan SEC ni yfinance)") \
+                    .classes("text-subtitle2")
+                with ui.row().classes("w-full gap-4 items-center no-wrap"):
+                    self.vj_sl = {}
+                    self.vj_sl_lbl = {}
+                    for clave, titulo in (("wacc", "WACC"), ("g", "Crecimiento terminal g"),
+                                          ("mos", "Margen de seguridad")):
+                        lo, hi, paso = VJ_SLIDERS[clave]
+                        with ui.column().classes("grow gap-0"):
+                            self.vj_sl_lbl[clave] = ui.label(titulo).classes("text-caption")
+                            self.vj_sl[clave] = ui.slider(min=lo, max=hi, step=paso, value=lo,
+                                                          on_change=lambda e, k=clave: self._vj_slider_cambiado(k)) \
+                                .props(f"label data-slider={clave}")
+                    ui.button("Restablecer supuestos", icon="restart_alt", on_click=self._vj_restablecer) \
+                        .props("dense outline size=sm data-accion=vj-reset")
+                self.vj_supuestos = ui.column().classes("gap-0 w-full").props("data-vj=supuestos")
+        self._vj_poner_sliders(automatico=True)   # sliders = parametros reales (sin ticker no hay entradas que lo hagan)
+        self._vj_actualizar()
+
+    # ---- valor justo: estado, calculo en memoria y repintado
+    def _vj_dict_actual(self) -> dict | None:
+        """Entradas del ticker actual: las de CACHE o, si el LRU de la nube lo expulso, las ya cargadas en la Vista."""
+        d = (CACHE.get(self.ticker or "") or {}).get("entradas_valoracion")
+        if d:
+            return d
+        return self.vj_dict if self.ticker is not None and self.ticker == self.vj_ticker else None
+
+    def _vj_cambio_entradas(self) -> bool:
+        """True si las entradas de valoracion del ticker actual no son las ya cargadas (otro ticker o nuevo Recalcular)."""
+        return self._vj_dict_actual() is not self.vj_dict or self.ticker != self.vj_ticker
+
+    def _vj_sincronizar(self) -> None:
+        """Toma de CACHE las entradas del ticker actual; si cambiaron, reinicia el WACC a su valor automatico."""
+        if not self._vj_cambio_entradas():
+            return
+        d = self._vj_dict_actual()
+        self.vj_ticker, self.vj_dict, self.vj_gen = self.ticker, d, self.vj_gen + 1
+        self.vj_entradas = fv.EntradasValoracion.desde_dict(d) if d else None
+        self.vj_modelos_cache = None
+        self.vj_params = fv.ParametrosValoracion(margen_seguridad=self.vj_params.margen_seguridad,
+                                                 g=self.vj_params.g)
+        self.vj_wacc_tocado = False
+        self._vj_poner_sliders(automatico=True)
+
+    def _vj_modelos(self) -> list[dict]:
+        """Los 15 modelos con los parametros actuales (en cache mientras entradas y parametros no cambien)."""
+        p = self.vj_params
+        clave = (self.vj_gen, p.wacc, p.g, p.rf, p.erp, p.pe_objetivo, p.ev_ebitda_objetivo, p.ev_revenue_objetivo,
+                 p.pb_objetivo, p.p_fcf_objetivo)
+        if self.vj_modelos_cache is None or self.vj_modelos_cache[0] != clave:
+            self.vj_modelos_cache = (clave, fv.calcular_modelos(self.vj_entradas, p) if self.vj_entradas else [])
+        return self.vj_modelos_cache[1]
+
+    def _vj_calcular(self) -> dict | None:
+        """Agregado actual (``fair_value.agregar_valor_justo`` sobre los modelos cacheados); None sin entradas."""
+        self._vj_sincronizar()
+        if self.vj_entradas is None:
+            self.vj_agg = None
+            return None
+        res = CACHE.get(self.ticker or "") or {}
+        px = _num(res.get("precio_actual")) or self.vj_entradas.precio
+        self.vj_agg = fv.agregar_valor_justo(self._vj_modelos(), [i for i, v in self.vj_activos.items() if v],
+                                             self.vj_params.margen_seguridad, px)
+        self.vj_agg["modelos"] = self._vj_modelos()
+        return self.vj_agg
+
+    def _vj_poner_sliders(self, automatico: bool = False) -> None:
+        """Mueve los sliders a los parametros actuales (sin disparar recalculos); ``automatico`` usa el WACC automatico."""
+        if not hasattr(self, "vj_sl"):
+            return
+        self._vj_silencio = True
+        try:
+            if automatico or self.vj_params.wacc is None:
+                auto = fv.calcular_tasas(self.vj_entradas, self.vj_params)["wacc_auto"] if self.vj_entradas else 0.09
+                self.vj_sl["wacc"].value = round(auto * 100, 1)
+            else:
+                self.vj_sl["wacc"].value = round(self.vj_params.wacc * 100, 1)
+            self.vj_sl["g"].value = round(self.vj_params.g * 100, 1)
+            self.vj_sl["mos"].value = round(self.vj_params.margen_seguridad * 100)
+            self._vj_limitar_g()
+        finally:
+            self._vj_silencio = False
+        self._vj_etiquetas_sliders()
+
+    def _vj_limitar_g(self) -> None:
+        """El slider de g no pasa de (WACC - DIF_MIN_WACC_G): por encima los DCF/EPV/DDM dejan de aplicar."""
+        w = float(self.vj_sl["wacc"].value)
+        tope = round(min(VJ_SLIDERS["g"][1], max(VJ_SLIDERS["g"][0], w - fv.DIF_MIN_WACC_G * 100)), 1)
+        self.vj_sl["g"].props(f"max={tope}")
+        if float(self.vj_sl["g"].value) > tope:
+            silencio, self._vj_silencio = self._vj_silencio, True
+            try:
+                self.vj_sl["g"].value = tope
+            finally:
+                self._vj_silencio = silencio
+
+    def _vj_etiquetas_sliders(self) -> None:
+        w, g, m = (self.vj_sl[k].value for k in ("wacc", "g", "mos"))
+        self.vj_sl_lbl["wacc"].text = f"WACC: {_es(w, 1)} %" + ("" if self.vj_wacc_tocado else " (automático)")
+        self.vj_sl_lbl["g"].text = f"Crecimiento terminal g: {_es(g, 1)} %"
+        self.vj_sl_lbl["mos"].text = f"Margen de seguridad: {_es(m, 0)} %"
+
+    def _vj_leer_sliders(self) -> None:
+        self._vj_limitar_g()
+        w, g, m = (float(self.vj_sl[k].value) for k in ("wacc", "g", "mos"))
+        self.vj_params = self.vj_params.con(wacc=w / 100.0 if self.vj_wacc_tocado else None, g=g / 100.0,
+                                            margen_seguridad=m / 100.0)
+        self._vj_etiquetas_sliders()
+
+    def _vj_slider_cambiado(self, clave: str) -> None:
+        """Slider movido por el usuario: actualiza parametros y etiquetas ya; el recalculo espera ``VJ_DEBOUNCE_S``."""
+        if self._vj_silencio:  # el cambio lo hizo el codigo (reset / cambio de ticker), no el usuario
+            return
+        if clave == "wacc":
+            self.vj_wacc_tocado = True
+        self._vj_leer_sliders()
+        self._vj_seq += 1
+        seq = self._vj_seq
+        try:
+            bucle = asyncio.get_running_loop()
+        except RuntimeError:  # sin bucle de eventos (llamada sincrona, p. ej. tests): aplicar de inmediato
+            self._vj_aplicar()
+            return
+        bucle.call_later(VJ_DEBOUNCE_S, self._vj_fin_debounce, seq)
+
+    def _vj_fin_debounce(self, seq: int) -> None:
+        if seq == self._vj_seq:  # solo el ultimo cambio de la rafaga recalcula
+            self._vj_aplicar()
+
+    def _vj_aplicar(self) -> None:
+        """Recalcula los modelos con los parametros actuales y repinta la pestana y la linea de Analisis."""
+        self._vj_actualizar()
+        self._vj_refrescar_linea()
+
+    def _vj_refrescar_linea(self) -> None:
+        """Redibuja el grafico de Analisis (~250 ms) solo si la linea del valor justo esta visible."""
+        if self.sw_vj.value:
+            self.refrescar(solo_figura=True)
+
+    def _vj_restablecer(self) -> None:
+        self.vj_params = fv.ParametrosValoracion()
+        self.vj_wacc_tocado = False
+        self.vj_modelos_cache = None
+        self._vj_poner_sliders(automatico=True)
+        self._vj_actualizar()
+        self._vj_refrescar_linea()
+
+    def _vj_toggle_modelo(self, id_: str, valor: bool) -> None:
+        if self._vj_silencio:
+            return
+        self.vj_activos[id_] = bool(valor)
+        self._vj_actualizar()
+        self._vj_refrescar_linea()
+
+    def _vj_seleccionar(self, ids: list[str]) -> None:
+        """Botones Seleccionar todos / Solo DCF / Solo Multiplos: deja activos exactamente ``ids``."""
+        self.vj_activos = {i: i in ids for i in fv.IDS_MODELOS}
+        self._vj_actualizar()
+        self._vj_refrescar_linea()
+
+    def _toggle_vj(self, valor: bool) -> None:
+        self.refrescar(solo_figura=True)
+
+    def _vj_para_grafico(self) -> dict | None:
+        """Agregado para la linea del grafico de Analisis (None si el interruptor esta apagado o no hay entradas)."""
+        if not getattr(self, "sw_vj", None) or not self.sw_vj.value:
+            return None
+        return self._vj_calcular()
+
+    def _vj_actualizar(self) -> None:
+        """Repinta toda la pestana Valor Justo (KPIs, casillas, grafico y supuestos) desde la memoria."""
+        if not hasattr(self, "vj_kpi"):
+            return
+        agg = self._vj_calcular()
+        res = CACHE.get(self.ticker or "") or {}
+        px = _num(res.get("precio_actual"))
+        self._vj_silencio = True
+        try:
+            if agg is None:
+                self.vj_msg.text = ("Pulsa Recalcular para analizar el ticker y obtener las entradas de valoración."
+                                    if not res else
+                                    "Este análisis no trae entradas de valoración (ver Avisos en Análisis); pulsa "
+                                    "Recalcular.")
+                for k in self.vj_kpi:
+                    self.vj_kpi[k].text = "n/d"
+                self.vj_kpi["incert"].classes(remove="vj-badge vj-baja vj-media vj-alta")
+                self.vj_kpi_detalle.text = ""
+                for fila in self.vj_rows.values():
+                    fila["chk"].set_enabled(False)
+                    fila["precio"].text = "n/d"
+                    fila["estado"].text = ""
+                    fila["tope"].text = ""
+                self.vj_grafico.update_figure(construir_figura_valor_justo(None, None, None))
+                self.vj_supuestos.clear()
+                self.vj_comp.clear()
+                return
+            self.vj_msg.text = ""
+            fair, up = agg.get("fair_value"), agg.get("upside_pct")
+            self.vj_kpi["precio"].text = _fmt(px, "${:,.2f}")
+            self.vj_kpi["fair"].text = _fmt(fair, "${:,.2f}")
+            self.vj_kpi["potencial"].text = _fmt(up, "{:+.1f} %")
+            self.vj_kpi["potencial"].classes(remove="txt-ok txt-error txt-muted")
+            debil = nota_soporte(agg.get("incertidumbre"), agg.get("n_usados")) if fair is not None else None
+            if up is not None:   # soporte debil (incert. Alta o n<3): color atenuado, el signo se lee igual en el texto
+                self.vj_kpi["potencial"].classes("txt-muted" if debil else ("txt-ok" if up >= 0 else "txt-error"))
+            if up is not None and debil:
+                self.vj_kpi["potencial"].text += f" · {debil}"
+            niv = agg.get("incertidumbre") if fair is not None else None
+            self.vj_kpi["incert"].classes(remove="vj-baja vj-media vj-alta")
+            self.vj_kpi["incert"].text = niv or "n/d"
+            if niv:
+                self.vj_kpi["incert"].classes("vj-badge " + {"Baja": "vj-baja", "Media": "vj-media", "Alta": "vj-alta"}[niv])
+            else:
+                self.vj_kpi["incert"].classes(remove="vj-badge")
+            self.vj_kpi["mos"].text = _fmt(agg.get("margin_of_safety_price"), "${:,.2f}")
+            cv = agg.get("cv")
+            self.vj_kpi_detalle.text = (agg.get("motivo") or
+                                        f"{agg['n_usados']} modelos usados de {agg['n_validos']} válidos"
+                                        + ("" if cv is None else f" | CV {_es(cv, 2)}")
+                                        + (f" | outliers: {len(agg['modelos_outlier'])}" if agg["modelos_outlier"] else ""))
+            for m in agg["modelos"]:
+                fila = self.vj_rows[m["id"]]
+                clave, texto = estado_modelo(m, agg, self.vj_activos.get(m["id"], True))
+                fila["chk"].set_enabled(bool(m["aplicable"]))
+                fila["chk"].value = bool(self.vj_activos.get(m["id"], True)) and bool(m["aplicable"])
+                fila["precio"].text = _fmt(m.get("precio_estimado"), "${:,.2f}")
+                fila["estado"].text = texto
+                fila["estado"].classes(remove="txt-muted txt-aviso txt-ok txt-error")
+                fila["estado"].classes({"activo": "txt-ok", "outlier": "txt-aviso"}.get(clave, "txt-muted"))
+                fila["estado"].props(f"data-estado={clave}")
+                fila["tope"].text = ("tope activo: " + "; ".join(m["topes"])) if m.get("tope_activo") and clave in (
+                    "activo", "outlier") else ""
+            self.vj_grafico.update_figure(construir_figura_valor_justo(agg["modelos"], agg, px, self.vj_activos))
+            self._vj_pintar_complementarias(agg, px)
+            self._vj_pintar_supuestos()
+        finally:
+            self._vj_silencio = False
+
+    def _vj_pintar_complementarias(self, agg: dict, px: float | None) -> None:
+        """Informacion complementaria bajo el consolidado: mediana, submedias por familia y promedio igualando familias."""
+        self.vj_comp.clear()
+        c = fv.complementarias(agg, agg.get("modelos"))
+        if c is None:
+            return
+        pct = lambda v: "" if v is None else f" ({v:+.0f} %)"  # noqa: E731
+        partes = [f"Mediana ${c['mediana']:,.2f}{pct(c['upside_mediana'])}"]
+        partes += [f"{g} ${v:,.2f} (n={c['n_por_grupo'][g]})" for g, v in c["submedias"].items()]
+        partes.append(f"Promedio igualando familias ${c['promedio_familias']:,.2f}{pct(c['upside_promedio_familias'])}")
+        fam = ", ".join(agg.get("familias_usadas") or []) or "n/d"
+        with self.vj_comp:
+            self.ui.label("Información complementaria (el consolidado sigue siendo el promedio simple): "
+                          + " | ".join(partes)).classes("text-caption").props("data-vj=comp-cifras")
+            self.ui.label(f"Los modelos no son independientes: los 6 DCF comparten WACC, g y crecimiento, y los de Valor "
+                          f"comparten EPS y valor contable, así que N modelos no equivalen a N confirmaciones. Familias "
+                          f"usadas: {fam}.").classes("text-caption txt-muted")
+
+    def _vj_lineas_dcf_inverso(self) -> list[str]:
+        """DCF inverso: WACC y crecimiento que iguala el DCF a 10 anios (FCF) con el precio."""
+        res = CACHE.get(self.ticker or "") or {}
+        di = fv.dcf_inverso(self.vj_entradas, self.vj_params, _num(res.get("precio_actual")) or self.vj_entradas.precio)
+        if di["wacc_implicito"] is None and di["g0_implicito"] is None:
+            return ["DCF inverso (DCF 10 años, FCF): sin solución en el rango razonable o el modelo no aplica."]
+        partes = []
+        if di["wacc_implicito"] is not None:
+            partes.append(f"WACC implícito {_es(di['wacc_implicito'] * 100, 2)} % (usado {_es(di['wacc_usado'] * 100, 2)} %)")
+        if di["g0_implicito"] is not None:
+            partes.append(f"crecimiento inicial implícito {_es(di['g0_implicito'] * 100, 1)} % (usado "
+                          f"{_es(di['g0_usado'] * 100, 1)} %)")
+        menos_riesgo = (di["wacc_implicito"] is not None and di["wacc_implicito"] < di["wacc_usado"]) or (
+            di["g0_implicito"] is not None and di["g0_implicito"] > di["g0_usado"])
+        cierre = ("el mercado descuenta menos riesgo o más crecimiento que estos supuestos" if menos_riesgo else
+                  "el mercado descuenta más riesgo o menos crecimiento que estos supuestos")
+        return ["DCF inverso (el que iguala el DCF a 10 años de FCF con el precio actual): " + "; ".join(partes)
+                + f". Lectura: {cierre}."]
+
+    def _vj_pintar_supuestos(self) -> None:
+        sp = fv.supuestos(self.vj_entradas, self.vj_params)
+        self.vj_supuestos.clear()
+        mult = sp["multiplos"]
+        lineas = [
+            f"WACC usado: {_es(sp['wacc'] * 100, 2)} % ({sp['wacc_origen']}; ke {_es(sp['ke'] * 100, 2)} %, kd "
+            f"{_es(sp['kd'] * 100, 2)} %, beta {_es(sp['beta'], 2)}, tasa libre de riesgo {_es(sp['rf'] * 100, 2)} %, "
+            f"prima de riesgo {_es(sp['erp'] * 100, 1)} %)",
+            f"g = {_es(sp['g'] * 100, 1)} % | margen de seguridad = {_es(self.vj_params.margen_seguridad * 100, 0)} % | "
+            f"tasa impositiva {_es(sp['tasa_impositiva'] * 100, 1)} % ({sp['tasa_origen']})",
+            "Crecimiento inicial proyectado: FCF " + _es(sp["crecimiento_inicial_fcf"] * 100, 1) + " %, EBITDA "
+            + _es(sp["crecimiento_inicial_ebitda"] * 100, 1) + " %, ingresos "
+            + _es(sp["crecimiento_inicial_revenue"] * 100, 1) + " % (converge a g)",
+            "Múltiplos objetivo: " + ", ".join(
+                f"{nombre} {'n/d' if mult[k]['valor'] is None else _es(mult[k]['valor'], 1) + 'x'}"
+                for k, nombre in (("pe", "P/E"), ("ev_ebitda", "EV/EBITDA"), ("ev_revenue", "EV/Ingresos"),
+                                  ("pb", "P/B"), ("p_fcf", "P/FCF"))),
+            "Margen FCF objetivo (DCF por ingresos): "
+            + ("n/d" if sp["margen_fcf_objetivo"] is None else _es(sp["margen_fcf_objetivo"] * 100, 1) + " %")]
+        if sp["topes_activos"]:
+            lineas.append("Topes activos (el resultado depende de ellos por construcción): " + "; ".join(sp["topes_activos"]))
+        if sp["flujos_ciclicos_normalizados"]:
+            lineas.append("Flujo cíclico normalizado (base = media de los últimos "
+                          f"{fv.N_NORMALIZACION} años, crecimiento inicial = g): " + ", ".join(sp["flujos_ciclicos_normalizados"]))
+        if sp["ajuste_fcff"]:
+            lineas.append(f"DCF de FCF: se suman los intereses después de impuestos ({_es(sp['ajuste_fcff'] / 1e6, 0)} M USD) "
+                          "para pasar de FCF apalancado a FCFF (la deuda se resta aparte).")
+        lineas.extend(self._vj_lineas_dcf_inverso())
+        if not sp["g_valido"]:
+            lineas.append(f"Aviso: la diferencia WACC - g es menor que {_es(fv.DIF_MIN_WACC_G * 100, 0)} pp (g "
+                          f"{_es(sp['g'] * 100, 1)} %, WACC {_es(sp['wacc'] * 100, 2)} %): los DCF, el EPV y el DDM no "
+                          f"aplican con estos supuestos.")
+        with self.vj_supuestos:
+            for linea in lineas:
+                self.ui.label(linea).classes("txt-aviso text-caption" if linea.startswith("Aviso") else
+                                             "txt-muted text-caption")
+            self.ui.label("Valor estimado por modelos con supuestos; no es un precio objetivo ni asesoría. La "
+                          "incertidumbre es alta cuando los modelos divergen.").classes("text-caption")
+
     def _panel_watchlist(self) -> None:
         ui = self.ui
         with ui.element("div").classes("aviso-box w-full").props("data-nota=watchlist-intro"):
@@ -1524,6 +2181,7 @@ class Vista:
             self.btn_stop = ui.button("Detener", icon="stop", on_click=self._detener_scan).props("flat")
             self.btn_stop.visible = False
             self.sw_bt_wl = ui.switch("Incluir backtest (lento)", value=not userdata.en_nube())
+            self.sw_vj_wl = ui.switch("Incluir valor justo (Upside)", value=not userdata.en_nube())
         self._actualizar_btn_scan()
         # Notas visibles (no solo tooltips): el capital NO se reparte entre tickers y el score es solo orden.
         with ui.element("div").classes("aviso-box w-full").props("data-nota=watchlist"):
@@ -1541,13 +2199,21 @@ class Vista:
             dict(name="confiabilidad", label="Confiabilidad", field="confiabilidad", sortable=True),
             dict(name="cobertura", label="Cobertura", field="cobertura", sortable=True),
             dict(name="mejor_zona", label="Mejor zona", field="mejor_zona", align="left"),
-            dict(name="dist_pct", label=f"{ETIQUETA_DIST_RSUP} %".capitalize(), field="dist_pct", sortable=True)],
+            dict(name="dist_pct", label=f"{ETIQUETA_DIST_RSUP} %".capitalize(), field="dist_pct", sortable=True),
+            dict(name="upside", label="Upside %", field="upside", sortable=True)],
             rows=[], row_key="id", pagination=0).props("dense flat bordered dark no-data-label=\"Pulsa Escanear "
                                                        "tu watchlist\"").classes("w-full cursor-pointer")
         self.tabla_wl.add_slot("body-cell-precio", _slot("'$' + props.value.toFixed(2)"))
         for col in ("score", "confluencia", "confiabilidad"):
             self.tabla_wl.add_slot(f"body-cell-{col}", _slot("props.value.toFixed(1)"))
         self.tabla_wl.add_slot("body-cell-dist_pct", _slot("((props.value > 0 ? '+' : '') + props.value.toFixed(1) + '%')"))
+        self.tabla_wl.add_slot("body-cell-upside", (
+            "<q-td :props=\"props\" :class=\"props.row.upside_nota ? 'txt-muted' : ''\">"
+            "{{ props.value == null ? 'n/d' : ((props.value > 0 ? '+' : '') + props.value.toFixed(1) + '%') }}"
+            "<span v-if=\"props.row.upside_nota\"> · {{ props.row.upside_nota }}</span></q-td>"))
+        self.tabla_wl.add_slot("header-cell-upside", _cabecera_con_ayuda(
+            "Potencial del valor justo consolidado (todos los modelos, supuestos por defecto) frente al precio. Es una "
+            "estimación, no un precio objetivo; n/d si no se calculó (opcional, apagado en la nube)."))
         self.tabla_wl.add_slot("body-cell-cobertura", _PLANTILLA_COBERTURA)
         self.tabla_wl.add_slot("header-cell-cobertura", _cabecera_con_ayuda(
             "Parte del peso de la Confiabilidad que tenía dato (pasa el ratón por una celda para ver qué quedó sin "
@@ -1730,13 +2396,17 @@ class Vista:
                       multi_line=True, timeout=8000)
             return
         CACHE[t] = res
-        if res.get("errores"):
-            ui.notify(f"{t}: {len(res['errores'])} etapa(s) con fallo (ver Avisos).", type="warning")
-        elif res.get("avisos"):
-            ui.notify(f"{t}: analisis completo con {len(res['avisos'])} aviso(s) de datos (ver Avisos).", type="warning")
+        n_err, n_av = len(res.get("errores") or []), len(res.get("avisos") or [])
+        del res  # la cache ya guarda el resultado; no retener una referencia mas (memoria en la nube)
+        if n_err:
+            ui.notify(f"{t}: {n_err} etapa(s) con fallo (ver Avisos).", type="warning")
+        elif n_av:
+            ui.notify(f"{t}: analisis completo con {n_av} aviso(s) de datos (ver Avisos).", type="warning")
         else:
             ui.notify(f"{t}: analisis completo.", type="positive")
         self.refrescar()
+        if userdata.en_nube():
+            gc.collect()  # 512 MB: liberar los DataFrames temporales del calculo
 
     async def escanear(self) -> None:
         ui = self.ui
@@ -1760,13 +2430,20 @@ class Vista:
                     break
                 self.lbl_scan.text = f"Analizando {t} ({i}/{len(tickers)})..."
                 try:
-                    r = await calcular_ticker(t, cap, self.sw_bt_wl.value, True)
+                    r = await calcular_ticker(t, cap, self.sw_bt_wl.value, True, self.sw_vj_wl.value)
                 except Exception as e:  # noqa: BLE001  (un fallo individual no aborta el escaneo)
                     r = {"ticker": t, "precio_actual": None, "zonas": [], "errores": [f"{type(e).__name__}: {e}"]}
                 if r.get("precio_actual") is not None:
+                    previo = CACHE.get(t) or {}
+                    if previo.get("entradas_valoracion") and not r.get("entradas_valoracion"):
+                        r["entradas_valoracion"] = previo["entradas_valoracion"]  # el escaneo (sin valor justo) no las borra
                     CACHE[t] = r  # LRU en la nube: solo los ultimos 3 conservan el df completo
-                resultados.append(resumen_liviano(r))  # el ranking solo necesita el resumen, no df/form4/r13f
-                del r
+                liviano = resumen_liviano(r)  # el ranking solo necesita el resumen, no df/form4/r13f
+                if self.sw_vj_wl.value:
+                    liviano["valor_justo"] = resumen_valor_justo(r)  # mismas entradas que la pestana Valor Justo
+                liviano.pop("entradas_valoracion", None)  # ya resumidas: no retenerlas en la lista del ranking
+                resultados.append(liviano)
+                del r, liviano
                 gc.collect()  # secuencial + liberar memoria tras cada ticker (512 MB en la nube)
                 self.prog.value = i / len(tickers)
         finally:
@@ -1794,6 +2471,7 @@ class Vista:
             self.tabla.rows = []
             self.tabla.update()
             self._tarjetas(None, [])
+            self._vj_actualizar()
             return
         act = familias_activas(k for k, v in self.activos.items() if v)
         av = anclas_valoracion(res)
@@ -1802,11 +2480,15 @@ class Vista:
         cob = _num(c.get("cobertura"))
         sub = (f"Confluencia {_fmt(res.get('confluencia_score'))}/100 | Confiabilidad {_fmt(c.get('indice'))}/100"
                + ("" if cob is None else f" (cobertura {cob * 100:.0f} %)"))
+        cambio = self._vj_cambio_entradas()  # ANTES de _vj_para_grafico, que sincroniza y lo dejaria en False
+        vj = self._vj_para_grafico()
         fig = construir_figura(res.get("df"), res["ticker"], zonas, res.get("precio_actual"), res.get("form4"),
-                               res.get("r13f"), av if "valoracion" in act else None, self.nivel_sel, sub)
+                               res.get("r13f"), av if "valoracion" in act else None, self.nivel_sel, sub, vj)
         self.grafico.update_figure(fig)
         if solo_figura:
             return
+        if cambio:
+            self._vj_actualizar()  # entradas nuevas (otro ticker o nuevo Recalcular)
         filas = filas_tabla(zonas, res.get("backtest_resumen"), res.get("precio_actual"))
         self.tabla.rows = filas
         self.tabla.selected = [f for f in filas if f["id"] == self.nivel_sel]

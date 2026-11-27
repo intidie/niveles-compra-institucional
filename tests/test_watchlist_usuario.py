@@ -114,8 +114,11 @@ def test_escaneo_en_nube_secuencial_libera_memoria_y_ranking_liviano(cliente, mo
     monkeypatch.setattr(ui_mod, "CACHE", ui_mod.CacheLRU(3))
     vistos, gc_llamadas = [], []
 
-    async def falso(t, cap, bt, sec):
+    pedidos_vj = []
+
+    async def falso(t, cap, bt, sec, vj=True):
         vistos.append((t, bt))
+        pedidos_vj.append(vj)  # se afirma fuera: un assert aqui dentro lo tragaria el except de escanear
         return {"ticker": t, "precio_actual": 10.0, "df": object(), "form4": None, "r13f": None, "zonas": [],
                 "errores": [], "confluencia_score": 50.0, "confiabilidad": {"indice": 50.0, "cobertura": 1.0}}
     monkeypatch.setattr(ui_mod, "calcular_ticker", falso)
@@ -133,6 +136,7 @@ def test_escaneo_en_nube_secuencial_libera_memoria_y_ranking_liviano(cliente, mo
     _correr(cliente, v.escanear)
     assert [t for t, _ in vistos] == ["AAA", "BBB", "CCC", "DDD", "EEE"] and all(bt is False for _, bt in vistos)
     assert len(gc_llamadas) == 5
+    assert pedidos_vj == [False] * 5  # en la nube el escaneo NO calcula el valor justo (columna Upside opcional)
     assert len(capturado["rs"]) == 5 and all("df" not in r for r in capturado["rs"])
     assert len(ui_mod.CACHE) == 3 and "AAA" not in ui_mod.CACHE
 
@@ -183,7 +187,7 @@ def test_escanear_solo_procesa_los_seleccionados_y_lista_vacia_avisa(cliente, mo
     userdata.guardar(["AAA", "BBB", "CCC"])
     vistos = []
 
-    async def falso(t, cap, bt, sec):
+    async def falso(t, cap, bt, sec, vj=True):
         vistos.append(t)
         return {"ticker": t, "precio_actual": 5.0, "zonas": [], "errores": []}
     monkeypatch.setattr(ui_mod, "calcular_ticker", falso)
@@ -231,3 +235,21 @@ def test_config_sin_pywebview_cae_a_navegador(capsys):
     c = ui_mod.config_ejecucion({}, pywebview_ok=False)
     assert c["native"] is False and c["show"] is True and "window_size" not in c and "pywebview" in capsys.readouterr().out
     assert ui_mod.config_ejecucion({"APP_UI_NATIVE": "0"})["native"] is False
+
+
+def test_escaneo_en_nube_no_pasa_valor_justo_a_analizar_ticker_por_defecto(cliente, monkeypatch):
+    """Camino real calcular_ticker -> analizar_ticker: en la nube el kw valor_justo llega como False."""
+    userdata.guardar(["AAA", "BBB"])
+    monkeypatch.setenv("PORT", "10000")
+    monkeypatch.setattr(ui_mod, "CACHE", ui_mod.CacheLRU(3))
+    kws = []
+    v = ui_mod.Vista()
+    v.construir()   # antes de parchear: la pestana Modelo lee la firma real de analizar_ticker
+    monkeypatch.setattr(ui_mod.nucleo, "analizar_ticker",
+                        lambda t, c, **kw: kws.append(kw) or {"ticker": t, "precio_actual": 1.0, "zonas": [], "errores": []})
+    _correr(cliente, v.escanear)
+    assert len(kws) == 2 and all(kw.get("valor_justo") is False for kw in kws)
+    v.sw_vj_wl.value = True                      # opt-in explicito: ya no se pasa el kw (analizar_ticker usa True)
+    kws.clear()
+    _correr(cliente, v.escanear)
+    assert len(kws) == 2 and all("valor_justo" not in kw for kw in kws)

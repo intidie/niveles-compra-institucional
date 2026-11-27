@@ -24,6 +24,27 @@ Abre la aplicación y, en la pestaña **Análisis**, elige un ticker (por ejempl
 **Recalcular**. El botón de estrella guarda el ticker en **tu watchlist**; en la pestaña **Watchlist** el botón Escanear
 calcula solo las acciones de tu lista y las ordena por puntaje. La pestaña **Modelo** explica la metodología.
 
+La pestaña **Valor Justo** promedia 15 modelos de valoración (DCF a 5 y 10 años sobre FCF, EBITDA e ingresos; P/E,
+EV/EBITDA, EV/Ingresos, P/B, P/FCF; DDM; EPV; Graham; Lynch) con los estados financieros de SEC EDGAR, muestra la
+incertidumbre (cuánto discrepan los modelos) y permite activar o desactivar modelos y mover WACC, g y el margen de
+seguridad sin volver a consultar nada. El interruptor **Mostrar Valor Justo** del panel lateral dibuja esa línea en el
+gráfico de Análisis. Es una implementación propia «estilo InvestingPro» (su metodología es propietaria y no se replica):
+un valor estimado con supuestos, no un precio objetivo, y es independiente de los niveles técnicos de compra.
+
+### Acceso directo en el Escritorio (Windows)
+
+Para abrir la app con doble clic y sin ventana de consola:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\crear_acceso_directo.ps1
+```
+
+Crea `Niveles Institucionales.lnk` en tu Escritorio (la ruta real de `[Environment]::GetFolderPath('Desktop')`, que
+respeta OneDrive y otras redirecciones). Ejecuta `.venv\Scripts\pythonw.exe app_ui.py` desde la carpeta del repositorio
+(la deduce de la ubicación del script), con `WindowStyle = 7` (minimizada; sin consola con `pythonw`, solo afecta a la ventana de la app: si arranca minimizada, cambia el valor a 1 en el script y vuelve a ejecutarlo) y usando el icono de `pythonw.exe`. Requiere haber
+creado el entorno virtual (ver abajo); si falta `pythonw.exe` o `app_ui.py` el script se detiene con un mensaje claro.
+Como `pythonw` no tiene consola, `app_ui.py` redirige la salida estándar a un dispositivo nulo al arrancar.
+
 ## Ejecución desde código
 
 ```bash

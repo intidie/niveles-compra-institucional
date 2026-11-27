@@ -42,13 +42,73 @@ BANDAS_SD = (1.5, 2.0)              # Requisito: -1.5 SD y -2.0 SD.
 
 
 # --- Utilidades XBRL ----------------------------------------------------------------------------
+_COLS_FACTS = ["concept", "label", "value", "numeric_value", "unit", "period_type", "period_start", "period_end",
+               "fiscal_year", "fiscal_period"]
+TOL_INICIO_DIAS = 5  # calendarios 52/53 semanas: el mismo periodo se reporta con inicio distinto en +-1-2 dias
+
+
+def _orden_presentacion(f: pd.DataFrame) -> pd.Series:
+    """Fecha de presentacion de cada fila: ``filed`` (filing_date de EDGAR) si existe; si falta, ``ref_filing``."""
+    ref = f["ref_filing"] if "ref_filing" in f.columns else pd.Series(pd.NaT, index=f.index)
+    if "filed" in f.columns:
+        return pd.to_datetime(f["filed"], errors="coerce").fillna(ref)
+    return ref
+
+
+def _inicio_canonico(inicio: pd.Series) -> pd.Series:
+    """Agrupa fechas de inicio que difieren <= TOL_INICIO_DIAS (mismo periodo reportado en filings distintos,
+    p. ej. KO 2010-07-02 vs 2010-07-03) bajo la menor de ellas. Los inicios de trimestres/YTD distintos distan
+    >= ~90 dias, asi que nunca se fusionan periodos diferentes. NaT (instantaneos) se conserva."""
+    ini = pd.to_datetime(inicio)
+    u = pd.Series(sorted(ini.dropna().unique()))
+    if u.empty:
+        return ini
+    canon = u.where(u.diff().dt.days.fillna(np.inf) > TOL_INICIO_DIAS).ffill()
+    return ini.map(dict(zip(u, canon)))
+
+
+def _dedup_periodo(f: pd.DataFrame, por_inicio: bool = True) -> pd.DataFrame:
+    """Una fila por periodo: conserva la observacion de la presentacion mas reciente (reexpresion vigente).
+
+    ``por_inicio=True`` -> clave (inicio canonico, period_end) (conserva Q1/H1/9M/FY que comparten fin de ano).
+    ``por_inicio=False`` -> clave period_end (series puntuales/trimestrales indexadas por fecha)."""
+    if f.empty:
+        return f
+    f = f.copy()
+    f["_orden"] = _orden_presentacion(f)
+    f["_ini"] = _inicio_canonico(f["period_start"]) if "period_start" in f.columns else pd.NaT
+    claves = ["_ini", "period_end"] if por_inicio else ["period_end"]
+    f = f.sort_values(["period_end", "_orden"], kind="stable", na_position="first")
+    return f.drop_duplicates(claves, keep="last").drop(columns="_orden")
+
+
+def _a_serie(f: pd.DataFrame, col: str = "numeric_value") -> pd.Series:
+    """Serie indexada por period_end con indice unico y ordenado (reexpresion mas reciente)."""
+    if f is None or len(f) == 0:
+        return pd.Series(dtype=float)
+    u = _dedup_periodo(f, por_inicio=False)
+    return pd.Series(u[col].values, index=pd.DatetimeIndex(u["period_end"].values)).sort_index()
+
+
+def _unica(s: pd.Series) -> pd.Series:
+    """Indice unico y ordenado (conserva la ultima observacion por fecha) antes de cualquier reindex."""
+    s = s[~s.index.duplicated(keep="last")] if s.index.has_duplicates else s
+    return s.sort_index()
+
+
 def _facts(ticker_symbol: str) -> pd.DataFrame:
     from src.data.sec_edgar import _asegurar_identidad
     from edgar import Company
     _asegurar_identidad()
-    df = Company(ticker_symbol).get_facts().to_pandas()
+    ef = Company(ticker_symbol).get_facts()
+    try:  # filing_date = fecha real de presentacion (misma cantidad de filas; solo agrega columnas)
+        df = ef.to_pandas(include_metadata=True, columns=_COLS_FACTS + ["filing_date", "form_type"])
+    except Exception:  # noqa: BLE001  (version de edgartools sin metadata: se cae a ref_filing)
+        df = ef.to_pandas()
     for c in ("period_start", "period_end"):
         df[c] = pd.to_datetime(df[c])
+    if "filing_date" in df.columns:
+        df["filed"] = pd.to_datetime(df["filing_date"], errors="coerce")
     df["numeric_value"] = pd.to_numeric(df["numeric_value"], errors="coerce")
     df["dur"] = (df["period_end"] - df["period_start"]).dt.days
     # Referencia de fecha de presentacion: fin del periodo principal del mismo (fiscal_year, fiscal_period).
@@ -66,16 +126,20 @@ def _factor_split(splits: pd.Series | None, desde: pd.Timestamp) -> float:
     return float(s[s.index > desde].prod()) if (s.index > desde).any() else 1.0
 
 
-def _serie_concepto(facts, concept, tipo, splits=None, ajusta_split=False):
-    """Filas deduplicadas (ultima presentacion) del concepto; opcionalmente ajustadas por splits."""
+def _serie_concepto(facts, concept, tipo, splits=None, ajusta_split=False, as_of=None):
+    """Filas deduplicadas (ultima presentacion) del concepto; opcionalmente ajustadas por splits.
+
+    ``as_of``: si se indica y existe ``filed``, se descartan presentaciones posteriores (sin look-ahead)."""
     f = facts[(facts["concept"] == concept) & (facts["period_type"] == tipo)].dropna(subset=["numeric_value"])
+    if as_of is not None and "filed" in f.columns:
+        f = f[f["filed"].isna() | (f["filed"] <= pd.Timestamp(as_of))]
     if f.empty:
         return f
-    f = f.sort_values("ref_filing").drop_duplicates(["period_start", "period_end"], keep="last").copy()
+    f = _dedup_periodo(f, por_inicio=True)
     if ajusta_split:
         fac = f["ref_filing"].apply(lambda t: _factor_split(splits, t + pd.Timedelta(days=REZAGO_PUBLICACION_DIAS)))
         f["numeric_value"] = f["numeric_value"] / fac
-    return f.sort_values("period_end")
+    return f.sort_values("period_end", kind="stable")
 
 
 def _flujo_trimestral(facts, concept, splits=None, ajusta_split=False) -> pd.Series:
@@ -86,8 +150,8 @@ def _flujo_trimestral(facts, concept, splits=None, ajusta_split=False) -> pd.Ser
     if f.empty:
         return pd.Series(dtype=float)
     q = {}
-    for _, g in f.groupby("period_start"):
-        g = g.sort_values("period_end")
+    for _, g in f.groupby(f["_ini"].fillna(f["period_start"])):  # inicio canonico (+-1-2 d entre filings)
+        g = g.sort_values("period_end", kind="stable")
         prev = 0.0
         for _, r in g.iterrows():
             if r["dur"] <= 110:
@@ -98,18 +162,18 @@ def _flujo_trimestral(facts, concept, splits=None, ajusta_split=False) -> pd.Ser
     # Los trimestres aislados prevalecen: se re-escriben con el valor standalone si existe.
     for _, r in f[f["dur"] <= 110].iterrows():
         q[r["period_end"]] = r["numeric_value"]
-    return pd.Series(q).sort_index()
+    return _unica(pd.Series(q, dtype=float))
 
 
 def _ttm_diario(q: pd.Series, idx: pd.DatetimeIndex) -> pd.Series:
     """TTM = suma 4 trimestres, disponible REZAGO dias despues del cierre del periodo, ffill diario."""
-    ttm = q.rolling(4).sum().dropna()
+    ttm = _unica(q).rolling(4).sum().dropna()
     ttm.index = ttm.index + pd.Timedelta(days=REZAGO_PUBLICACION_DIAS)
     return ttm.reindex(ttm.index.union(idx)).ffill().reindex(idx)
 
 
 def _puntual_diario(s: pd.Series, idx: pd.DatetimeIndex) -> pd.Series:
-    s = s.copy()
+    s = _unica(s).copy()
     s.index = s.index + pd.Timedelta(days=REZAGO_PUBLICACION_DIAS)
     return s.reindex(s.index.union(idx)).ffill().reindex(idx)
 
@@ -145,7 +209,7 @@ def pe_historico(ticker_symbol, ticker_obj, df, facts=None) -> dict | None:
             fila = next(r for r in ("Diluted EPS", "Basic EPS") if r in q.index)
             eps_q = pd.to_numeric(q.loc[fila], errors="coerce").dropna()
             eps_q.index = pd.to_datetime(eps_q.index).tz_localize(None)
-            eps_q = eps_q.sort_index()
+            eps_q = _unica(eps_q)
             fuente = "FALLBACK yfinance quarterly_income_stmt"
         except Exception:  # noqa: BLE001
             return None
@@ -181,18 +245,18 @@ def ev_fcf_historico(ticker_symbol, ticker_obj, df, facts=None) -> dict | None:
                                  "duration", splits=splits, ajusta_split=False)
         sh = sh[sh["dur"] <= 110]
         fac = sh["ref_filing"].apply(lambda t: _factor_split(splits, t + pd.Timedelta(days=REZAGO_PUBLICACION_DIAS)))
-        sh_q = pd.Series((sh["numeric_value"] * fac).values, index=sh["period_end"].values)
+        sh_q = _a_serie(sh.assign(numeric_value=sh["numeric_value"] * fac))
         cajas = []
         for c in ("us-gaap:CashAndCashEquivalentsAtCarryingValue", "us-gaap:MarketableSecuritiesCurrent",
                   "us-gaap:ShortTermInvestments"):
             s = _serie_concepto(facts, c, "instant")
             if not s.empty:
-                cajas.append(s.set_index("period_end")["numeric_value"])
+                cajas.append(_a_serie(s))
         _, deuda_df = _primer_concepto(facts, ["us-gaap:LongTermDebt", "us-gaap:LongTermDebtNoncurrent"], "instant")
         if len(fcf_q) < 8 or sh_q.empty or not cajas:
             return None
         caja = pd.concat(cajas, axis=1).ffill().sum(axis=1)
-        deuda = deuda_df.set_index("period_end")["numeric_value"] if not deuda_df.empty else pd.Series(0.0, index=caja.index)
+        deuda = _a_serie(deuda_df) if not deuda_df.empty else pd.Series(0.0, index=caja.index)
     except Exception as e:  # noqa: BLE001
         warnings.warn(f"EV/FCF no disponible: {e}")
         return None
