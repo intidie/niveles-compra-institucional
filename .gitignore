@@ -12,3 +12,5 @@ _cache/
 resultados/
 build/
 dist/
+
+!watchlist.csv
