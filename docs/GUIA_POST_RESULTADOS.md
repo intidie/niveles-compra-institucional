@@ -51,7 +51,7 @@ fechas mensuales): una muestra pequeña y ruidosa por ticker, **no comparable co
 * Confiabilidad ilustrativa: respaldo 25, STOCK Act 50, absorción 26, backtest 57, confluencia 60. Con los pesos
   calibrados da 42.5. Ranking = (60 + 42.5) / 2 = 51.3. Un 42.5 **no** significa "42.5 % de probabilidad".
 * Backtest ilustrativo del ticker: Fill Rate 35 %, Bounce 67 %, MAE60 mediano -8 %, con 14 fills (por encima de 10,
-  así que no sale el aviso de muestra pequeña). Son valores parecidos al pool real (34.4 %, 66.9 %, -8.4 %) solo
+  así que no sale el aviso de muestra pequeña). Son valores parecidos al pool real (34.8 %, 61.2 %, -9.1 %) solo
   para que el ejemplo sea creíble; el pool **no** es comparable con la cifra de un ticker (otra muestra y otra ventana).
 
 ## 3. Checklist paso a paso
@@ -85,7 +85,7 @@ Abre `resultados/<TICKER>_niveles.png`.
 
 ### (d) Cuánto capital usar y en cuántos tramos
 - `--capital` es el dinero para **ese ticker** (por defecto $1,000), no tu patrimonio.
-- Fórmula del sistema: `capital × familias de la zona / suma de familias de las 3 primeras zonas`. Es un criterio simple (más confluencia, más peso), **no probado**: en el backtest, más familias no dio mejores retornos a 60 ruedas (Spearman -0.149).
+- Fórmula del sistema: `capital × familias de la zona / suma de familias de las 3 primeras zonas`. Es un criterio simple (más confluencia, más peso), **no probado**: en el backtest, más familias no dio mejores retornos a 60 ruedas (Spearman(n_familias, ret60) = -0.012, sin efecto detectable). Además, con las zonas estrechas solo el 9.4 % de las órdenes tiene 3 o más familias (antes 40.3 %): lo normal son zonas de 1 o 2 familias, así que el reparto se acerca a partes iguales y a veces solo hay 1 o 2 zonas.
 - Es una guía, no una orden: puedes dividir a partes iguales o reducir tramos lejanos.
 - En modo watchlist **cada ticker recibe el capital completo** (`analizar_ticker(t, args.capital)`; la ayuda de `--capital`, el encabezado del ranking, el export y la pestaña Watchlist lo dicen). Si escaneas 10 y todo se llena necesitarías 10 veces el capital. Decide primero tu presupuesto total y divídelo tú.
 - El sistema no calcula stop ni % de riesgo. Traduce el MAE: a 252 ruedas el peor punto fue -16.3 % (mediana) y -21.4 % (media). En $1,000 son unos $163 a $214 de pérdida temporal. Dimensiona tu posición según lo que podrías soportar.
@@ -95,16 +95,16 @@ Abre `resultados/<TICKER>_niveles.png`.
 - El backtest asume: orden GTC en **r_sup**, vida de **63 ruedas** (~3 meses). Cuenta como llenada si el mínimo del día es menor o igual a r_sup. El precio de entrada es el menor entre la apertura y r_sup (si abre con gap hacia abajo, compras más barato que tu límite).
 - Escalonar = una orden por zona, con las acciones indicadas. En el ejemplo: 5.682 @ $88.00, 3.546 @ $94.00 y 2.058 @ $81.00 (si tu bróker no admite fracciones, redondea).
 - Solo se auditó el rango primario (N1), con 5 años de historial por defecto (unos 10 a 33 fills, estimación; la consola muestra los reales); la combinación de órdenes y las zonas N2-N4 no se probaron una por una.
-- Expectativas del pool: se llena ~1 de cada 3 (34.4 %); MSFT 17.7 % y OXY 58.1 %; tarda 14.4 ruedas de media.
+- Expectativas del pool: se llena ~1 de cada 3 (34.8 %); MSFT 18.6 % y OXY 59.5 %; tarda 15.1 ruedas de media. Las zonas actuales son más estrechas (mediana ~4 % del precio, tope 5 % y 2 ATR) y por eso se tocan menos: en 32 tickers el fill rate bajó 3.7 puntos frente al diseño anterior, y más en acciones de baja volatilidad. Menos llenados es el precio de una zona más precisa; no se demostró mejor rendimiento.
 - El backtest es optimista: un toque exacto cuenta como llenado y no modela comisiones, impuestos ni liquidez.
 - **Si no se llena** en ~63 ruedas: no la dejes olvidada. Cancela, recalcula el screener y coloca órdenes nuevas con las zonas vigentes. No subas el límite "para asegurar" el llenado.
 
 ### (f) Si el precio toca la zona, la perfora o nunca llega
 | Situación | Qué mostró el historial (pool, 6 tickers) | Qué hacer |
 |---|---|---|
-| **Toca y se llena** | MAE60 mediano -8.4 % (media -11.8 %); MAE252 mediano -16.3 % (media -21.4 %). Rebote +5 % en 20 ruedas: 66.9 % (1 de cada 3 no lo logró). | Asume que el precio **probablemente baje más** antes de subir: compraste tras una caída. Ejemplo: entrada $88.00 con MAE60 mediano -8.4 % = mínimo típico cerca de $80.61 (la mitad de los casos fue peor). No agregues dinero fuera del plan; para eso están las zonas inferiores. |
-| **Confirmación vs. recibir el golpe** | Hubo "absorción" (vela de rechazo con volumen > 1.35 x SMA20, cierre en el tercio superior, en las 6 velas desde el toque: la del toque y las 5 siguientes) en 26.3 % de los llenados. Con absorción el retorno medio a 60 ruedas fue menor (+8.12 % vs +9.22 % sin absorción). | Esperar confirmación **no tiene respaldo** en estos datos y sale más caro. Elige antes una vía (límite y aceptar MAE, o entrar tras confirmar y aceptar menos llenados) y no la cambies a mitad. Ninguna regla de confirmación fue probada. |
-| **La perfora** | "Rebote fallido" = mínimo bajo r_inf menos 3 % (ej. r_inf $85 -> $82.45) en 20 ruedas. Es una regla de medición, no un stop probado. Solo el 5.9 % de los llenados ya tocaba r_inf el mismo día del llenado. | Es la señal de que la estructura dejó de sostener. Pausa los tramos pendientes, recalcula zonas, revisa fundamentales (nuevo 10-Q) y decide con una regla escrita de antemano. |
+| **Toca y se llena** | MAE60 mediano -9.1 % (media -12.2 %); MAE252 mediano -15.9 % (media -21.1 %). Rebote +5 % en 20 ruedas: 61.2 % (casi 4 de cada 10 no lo logró). | Asume que el precio **probablemente baje más** antes de subir: compraste tras una caída. Ejemplo: entrada $88.00 con MAE60 mediano -9.1 % = mínimo típico cerca de $80.00 (la mitad de los casos fue peor). No agregues dinero fuera del plan; para eso están las zonas inferiores. |
+| **Confirmación vs. recibir el golpe** | Hubo "absorción" (vela de rechazo con volumen > 1.35 x SMA20, cierre en el tercio superior, en las 6 velas desde el toque: la del toque y las 5 siguientes) en 28.7 % de los llenados. Con absorción el retorno medio a 60 ruedas fue mayor (+10.9 % vs +5.2 % sin ella), pero esa vela se mide **después** de entrar: no es una señal disponible al colocar la orden. Midiendo desde la 6.ª rueda la diferencia es +9.5 % vs +4.5 % (p≈0.06): sugerente, no concluyente (posible look-ahead; límite abierto). | Esperar confirmación **no tiene respaldo demostrado** (la asociación con el retorno es post-entrada y débil) y sale más caro. Elige antes una vía (límite y aceptar MAE, o entrar tras confirmar y aceptar menos llenados) y no la cambies a mitad. Ninguna regla de confirmación fue probada. |
+| **La perfora** | "Rebote fallido" = mínimo bajo r_inf menos 3 % (ej. r_inf $85 -> $82.45) en 20 ruedas. Es una regla de medición, no un stop probado. Solo el 11.4 % de los llenados ya tocaba r_inf el mismo día del llenado. | Es la señal de que la estructura dejó de sostener. Pausa los tramos pendientes, recalcula zonas, revisa fundamentales (nuevo 10-Q) y decide con una regla escrita de antemano. |
 | **Nunca llega** | ~65.6 % de las órdenes no se llenó en 63 ruedas. El costo de oportunidad de esos casos no se midió. | No perseguir: no subir el límite ni comprar por impulso. Recalcula en la fecha prevista. Acepta que puedes quedarte fuera. |
 
 ### (g) Cuándo reevaluar o recalcular
@@ -129,7 +129,7 @@ Abre `resultados/<TICKER>_niveles.png`.
 - Cada ticker lleva el **capital completo**: el ranking no reparte dinero entre tickers.
 - Qué NO concluir:
   - La Zona 1 puede estar muy abajo: mira la columna de distancia a r_sup (consola y pestaña Watchlist) o `z1_dist_pct` del CSV.
-  - El ranking está **dominado por la confluencia**: pesa 55.5 % del score (0.5 directo + 0.5 x 0.1096 como componente de la confiabilidad, con el peso de `pesos_calibrados.json` y cobertura 100 %); sube con menos cobertura (58.4 % con `--sin-sec`, 61.9 % con `--sin-backtest`). Justo ese componente tiene la peor evidencia propia (Spearman con ret60 = -0.149, t = -2.30): **no hay respaldo de que más familias mejoren el retorno**.
+  - El ranking está **dominado por la confluencia**: pesa 56.7 % del score (0.5 directo + 0.5 x 0.1342 como componente de la confiabilidad; el peso sale de `pesos_calibrados.json`, con cobertura 100 %); sube con menos cobertura (59.6 % con `--sin-sec`, 65.5 % con `--sin-backtest`). Ese componente no tiene respaldo propio (Spearman con ret60 = -0.012, t = -0.18): **no hay evidencia de que más familias mejoren el retorno**, y como ahora los valores altos de confluencia son raros (solo 9.4 % de las órdenes con 3 o más familias), la mayoría de los activos tendrá confluencia baja o media.
   - Score alto no significa mejores resultados (ver sección 5).
   - No incorpora calidad del negocio, valoración completa ni earnings.
   - Comparar scores con coberturas distintas (SEC o backtest apagados, componentes `sin dato`) no es justo.
@@ -137,11 +137,12 @@ Abre `resultados/<TICKER>_niveles.png`.
 ## 5. Lo que los datos dicen con honestidad
 | Hallazgo (METODOLOGIA.md) | Dato | Consecuencia práctica |
 |---|---|---|
-| El índice no discrimina | Spearman(score, bounce) = -0.020; (score, ret60) = -0.028 (n = 237 llenados). Terciles bajo/medio/alto: bounce 70.9 / 65.8 / 64.6 %; ret60 media 14.4 / 4.8 / 7.6 %; ret60 mediana 10.7 / 3.6 / 8.1 %; MAE60 mediana -8.0 / -8.7 / -9.7 %. | No uses el índice para elegir ni para dimensionar. El tercil alto no rindió mejor y tuvo MAE algo peor. |
+| El índice no discrimina resultados en conjunto | Spearman(score, ret60) = +0.154 pero Spearman(score, bounce) = -0.084 (n = 236 llenados). Terciles bajo/medio/alto: bounce 65.0 / 61.0 / 57.0 %; ret60 media 4.5 / 5.4 / 10.6 %; ret60 mediana 1.4 / 5.6 / 10.3 %; MAE60 mediana -9.1 / -8.7 / -10.0 %. | El retorno a 60 ruedas sube algo con el score, pero el rebote y la MAE empeoran y el t está inflado por el solapamiento. No es una probabilidad: no lo uses para elegir ni para dimensionar. |
+| Absorción: posible look-ahead | El peso de la absorción (33.2 %) sale de una calibración que mide la señal en las 5 velas **posteriores** al llenado, es decir después de entrar. El auditor midió desde el cierre k+5: retorno medio con absorción +9.5 % vs sin +4.5 % (t≈1.9, p≈0.06). | Sugerente pero no concluyente; es una limitación abierta (la fórmula no se cambió). No leas el peso como poder predictivo. |
 | Mediana a 252 ruedas ≈ línea base | Llenado 22.6 % vs base 22.5 %. Media 30.3 % vs 24.2 %. A 20 ruedas, mediana 2.2 % vs 2.3 %. | La ventaja está en las medias, no en la mediana. No hay evidencia independiente de alfa. |
 | MAE peor que la base | 60 ruedas: -8.4 % vs -6.6 %. 252 ruedas: -16.3 % vs -11.9 %. | Esperar el nivel implica comprar mientras cae. Cuenta con sufrir más que si comprases "a mercado". |
 | Caso OXY | Mediana negativa a 60/120/252 ruedas. | Una zona puede fallar durante meses. |
-| Muestra 13F pequeña | 16 trimestres con compra neta. Solape estricto 0.0 %; rodante 25.0 % vs 34.8 % de un control aleatorio; toque estricto 18.8 %; distancia mediana VWAP a la zona más cercana 15.2 %. Berkshire/AAPL: 0 de 9 trimestres solapan. | Los fondos compraron cerca del mercado y en tendencia; el algoritmo propone zonas profundas. Los niveles **no** coinciden mejor que el azar con las compras 13F. No los uses como "dónde compra el dinero grande". |
+| Muestra 13F pequeña | 16 trimestres con compra neta. Solape estricto 6.2 % (1 de 16); rodante 25.0 % vs 29.8 % de un control aleatorio; toque estricto 37.5 %. | Los fondos compraron cerca del mercado y en tendencia; el algoritmo propone zonas profundas. Los niveles **no** coinciden mejor que el azar con las compras 13F. No los uses como "dónde compra el dinero grande". |
 | Sesgos | 6 tickers grandes y ganadores (supervivencia), 10 años mayormente alcistas, órdenes mensuales solapadas (t-stat inflados), sin costos/impuestos/liquidez, Form 4 y STOCK Act sin probar, valoración XBRL no auditada, umbrales fijados a priori (+5 %/20 d, -3 %, ventana de absorción de 6 velas). | Los números son orientativos y optimistas. Los pesos calibrados son casi los a priori: no son evidencia de poder predictivo. |
 | Backtest del screener ≠ pool | Solo rango primario (N1), 5 años por defecto, ~60 fechas mensuales: del orden de 10 a 33 fills por ticker (estimación). El pool usa 6 tickers y 10 años. | Fill, Bounce y MAE de un ticker son más ruidosos y **no comparables** con el pool; con menos de 10 fills la consola avisa `muestra pequeña`. |
 
@@ -158,7 +159,7 @@ Conclusión práctica:
 | Concentrar todo en un ticker | El capital es por ticker; el sistema no diversifica por ti. |
 | Sumar el capital de varios tickers como un solo presupuesto | En modo watchlist cada ticker recibe el capital completo: con 10 tickers llenos necesitarías 10 veces ese capital. |
 | Comparar scores con cobertura distinta | Un score con backtest y otro sin él (o con componentes `sin dato`) promedian cosas distintas. |
-| Tratar el ranking como señal | Está dominado por la confluencia (55.5 %), que no mostró relación positiva con el retorno. Solo ordena tu lista de revisión. |
+| Tratar el ranking como señal | Está dominado por la confluencia (56.7 %), que no mostró relación positiva con el retorno. Solo ordena tu lista de revisión. |
 | Leer el backtest del ticker como el pool | 5 años, solo N1 y pocos fills; con `muestra pequeña: N fills` es ruido. |
 | Olvidar los earnings | La consola no los imprime; un gap de resultados puede llenar o romper la orden. |
 | Tratar el índice como probabilidad | 42.5 no es "42.5 % de acierto"; el índice no discrimina resultados. |
@@ -171,7 +172,7 @@ Conclusión práctica:
 |---|---|
 | Rueda | Sesión bursátil. 21 ruedas ≈ 1 mes, 63 ≈ 3 meses, 252 ≈ 1 año. |
 | Orden límite / GTC | Compra solo a un precio máximo. GTC = permanece activa hasta cancelarla. |
-| Zona (r_inf, r_sup) | Rango de precio donde coinciden varias anclas (ancho máx. 3 ATR semanales; ATR = rango típico de una semana). |
+| Zona (r_inf, r_sup) | Rango de precio donde coinciden varias anclas (ancho máx. 2 ATR semanales y 5 % del precio; ATR = rango típico de una semana). |
 | Volume Profile / HVN | Mapa de dónde se negoció más volumen (Steidlmayer). HVN = nodo de alto volumen. |
 | Anchored VWAP (AVWAP) | Precio medio ponderado por volumen desde un evento clave (Shannon). |
 | Order Block | Zona semanal de actividad fuerte aún no "mitigada" (concepto Smart Money; sin respaldo académico formal). |
@@ -186,3 +187,10 @@ Conclusión práctica:
 
 ---
 **Material educativo; no constituye asesoría financiera ni recomendación de inversión.**
+
+## Nota sobre zonas más estrechas (cambio 2026-11-26)
+
+- Las zonas ahora son más estrechas (HVN acotado a su pico, Order Block acotado a 1 ATR desde su techo, ancho máximo 2 ATR y 5 % del precio; las anclas sobre el precio o con menos de la mitad de su rango en la banda se descartan). Ejemplo real con fecha 2026-11-25 (NVDA): N1 pasó de 104.51-114.81 (más una AVWAP sobre el precio) a un único N1 107.35-114.81.
+- Consecuencias: **menos zonas por activo** (a veces 1 o 2), **menor fill rate** (-3.7 puntos en 32 tickers; más en baja volatilidad) y valores altos de confluencia más raros. La calidad medida no empeoró de forma distinguible del ruido, pero tampoco hay una mejora demostrada.
+- El "núcleo" aún más estrecho de cada zona existe en los datos, pero no se usa como rango operativo.
+- La tabla de la interfaz muestra el ancho de cada zona en % del precio.

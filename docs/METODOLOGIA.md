@@ -31,55 +31,78 @@ Reproducir con (PowerShell, desde la raiz del proyecto):
   `df.iloc[:i+1]` (datos hasta la fecha t). Se reutiliza `src.levels.volume_liquidity` (Volume Profile 5 anios, AVWAP
   minimo 2 anios y minimo de la ultima correccion >= 20 %, Order Blocks semanales) y `bandas_log_regresion`, mas
   swing lows semanales macro (minimo de +-10 semanas, confirmado).
-* Anclas puntuales se ensanchan +-0.25 ATR semanal; se agrupan en clusters de ancho <= 3 ATR semanal, bajo el precio
-  (0.5 %-30 % debajo). Rango primario = cluster con mas familias de ancla (volumen, AVWAP, OB, swing, log-reg), empate por cercania.
+* **Zonas estrechas (defaults vigentes desde 2026-11-26; detalle y A/B en la seccion 8).** Cada ancla se estrecha
+  antes de agrupar, siempre sobre estructura acumulada y nunca sobre el cierre del dia: las anclas puntuales (POC, VAL,
+  VAH, AVWAP, swing, log-reg) valen +-0.25 ATR semanal (`ANCHO_PUNTUAL_ATR`); un HVN es el pico del nodo +-0.5 ATR
+  (`HVN_SEMIANCHO_ATR`, dentro del nodo; antes el nodo completo); un Order Block mide como maximo 1.0 ATR y conserva su
+  borde superior, que es el que toca primero el precio (`OB_ANCHO_MAX_ATR`, `OB_DESDE_TECHO`); ninguna ancla supera el
+  tope de ancho del cluster (`ACOTAR_ANCLAS`).
+* **Regla de banda (`FRAC_MIN_EN_BANDA = 0.5`):** se descarta toda ancla con menos del 50 % de su rango dentro de la banda
+  de busqueda [-30 %, -0.5 %] bajo el precio (recortarla dejaria una astilla sin significado). Las anclas aceptadas se
+  agrupan en clusters por fusion en cadena (`MODO_CLUSTER = "cadena"`) con ancho <= `ANCHO_MAX_CLUSTER_ATR = 2.0` ATR
+  semanal **y** <= `ANCHO_MAX_CLUSTER_PCT = 5 %` del precio (el menor de ambos topes; antes 3 ATR y sin tope relativo).
+  Rango primario = cluster con mas familias de ancla (volumen, AVWAP, OB, swing, log-reg), luego mas anclas, luego mas cercano.
+* **Nucleo (disponible, no operativo):** cada cluster calcula ademas `lo_nucleo`/`hi_nucleo` (la sub-ventana de centros de
+  ancla mas estrecha que reune >= 60 % del peso, con relleno de 0.1 ATR y ancho minimo de 0.3 ATR) y conserva el rango
+  completo en `lo_amplio`/`hi_amplio`. `NUCLEO_OPERATIVO = False`: el rango operativo (`lo`/`hi`, el que se ordena y se
+  audita) es el cluster completo; con `True` pasaria a ser el nucleo. Existe tambien `MODO_CLUSTER = "ventana"` (sin
+  fusion en cadena). Ninguna de las dos opciones se usa en los resultados de este documento.
+* **Reproducir el diseno historico:** `params_zonas(**PARAMS_HISTORICOS)` (3 ATR, sin tope %, anclas sin acotar, HVN/OB
+  completos, sin regla de banda) y pasarlo como `params=` a `backtest_ticker`. Las cifras del diseno historico solo se
+  conservan, etiquetadas, en la seccion 8.
 * Se **excluyen** P/E, EV/FCF y DCF de EDGAR del backtest: `valuation_floors._facts` devuelve el historico completo de hoy
   y no es point-in-time. `avwap_multiciclo` se invoca sin ticker para no consultar el 10-K actual.
 
 ### 2.2 Simulacion de la orden
 Orden limite GTC en `r_sup`, vigencia 63 ruedas (las barras posteriores a la fecha de colocacion). Llenado en la primera rueda `k` con `Low <= r_sup`; entrada = min(Open del dia, r_sup). Las definiciones exactas siguientes son las de `evaluar_orden` (`backtest_ranges.py`).
-* **Fill profundo (`<= r_inf`):** es `Low[k] <= r_inf`, evaluado **solo el dia del llenado** (`profunda`). No mira las ruedas posteriores: un precio que perfora `r_inf` despues del dia del llenado no cuenta como fill profundo (eso lo recoge el MAE, no esta columna). Esto explica en parte que la cifra sea baja (5.9 % en el pool).
+* **Fill profundo (`<= r_inf`):** es `Low[k] <= r_inf`, evaluado **solo el dia del llenado** (`profunda`). No mira las ruedas posteriores: un precio que perfora `r_inf` despues del dia del llenado no cuenta como fill profundo (eso lo recoge el MAE, no esta columna). Esto explica en parte que la cifra sea baja (11.4 % en el pool; 5.9 % en el diseno historico, ver la seccion 8: con la zona mas estrecha `r_inf` queda mas cerca de `r_sup` y perforarlo el dia del llenado es mas facil).
 * **Absorcion:** ventana = la vela del toque (`k`) **mas las 5 siguientes**, es decir 6 velas (`range(k, k + 5 + 1)`, truncada al final de los datos); donde este documento dice "5 ruedas desde el toque" se refiere a estas 5 posteriores al toque, ademas de la propia vela del toque. Una vela cuenta como absorcion si cumple a la vez: intersecta el rango (`Low <= r_sup` y `High >= r_inf`; no se exige que quede contenida en el), volumen > 1.35 x SMA(20) del volumen de las 20 ruedas **previas** (la propia vela no entra en la media), cierre en el tercio superior de la vela (`(Close - Low) / (High - Low) >= 2/3`) y `Close >= r_inf` (puede cerrar por encima de `r_sup`).
 * **Bounce:** la meta es `High >= entrada x 1.05` y la invalidacion es el **minimo intradia** `Low < r_inf x (1 - 0.03)` (no el cierre). Se recorren las barras `k .. k + 20` (la del llenado y las 20 siguientes) en orden; si en una misma barra se cumplen ambas, cuenta como fallo (la invalidacion se evalua primero). Un llenado con gap cuyo Low ya cae bajo `r_inf - 3 %` el mismo dia es fallo inmediato. Solo se calcula si existen las 20 ruedas posteriores (censura por derecha).
 * **Retorno forward** 20/60/120/252 ruedas = `Close[k + h] / entrada - 1`, solo si `k + h` existe en los datos (censura por derecha por horizonte: de ahi n = 229 y 214 a 120 y 252 ruedas). **MAE** = `min(Low[k .. k + h]) / entrada - 1` a 60 y 252 ruedas.
 * **Linea base:** compra al Close de cada fecha de rebalanceo con los mismos horizontes. `resumen` la calcula sobre **todas** las fechas de rebalanceo con horizonte disponible (sin filtrar por existencia de rango ni por ventana de vida completa), por lo que su n no coincide con el de los llenados.
 
-### 2.3 Resultados (AAPL, MSFT, META, OXY, GOOGL, UNH; 686 ordenes validas, 236 llenadas)
+### 2.3 Resultados (AAPL, MSFT, META, OXY, GOOGL, UNH; 682 ordenes validas, 237 llenadas; zonas estrechas vigentes)
 
-Tasas (ordenes con ventana de vida completa):
+Tasas (ordenes con rango y ventana de vida completa; 720 fechas, de las que 20 sin rango y 4 sin ventana completa):
 
 | Ticker | Ordenes | Fills | Fill rate | Fill profundo (<= r_inf) | Dias a fill | Absorcion | Bounce |
 |---|---|---|---|---|---|---|---|
-| AAPL | 116 | 27 | 23.3 % | 22.2 % | 19.0 | 25.9 % | 51.9 % |
-| GOOGL | 109 | 27 | 24.8 % | 7.4 % | 17.7 | 29.6 % | 77.8 % |
-| META | 114 | 48 | 42.1 % | 6.2 % | 16.0 | 29.2 % | 70.8 % |
-| MSFT | 113 | 20 | 17.7 % | 0.0 % | 12.2 | 25.0 % | 75.0 % |
-| OXY | 117 | 68 | 58.1 % | 2.9 % | 11.9 | 23.5 % | 58.8 % |
-| UNH | 117 | 46 | 39.3 % | 2.2 % | 12.7 | 26.1 % | 73.9 % |
-| **POOL** | 686 | 236 | **34.4 %** | 5.9 % | 14.4 | **26.3 %** | **66.9 %** |
+| AAPL | 115 | 33 | 28.7 % | 9.1 % | 18.4 | 24.2 % | 60.6 % |
+| GOOGL | 107 | 24 | 22.4 % | 4.2 % | 17.2 | 45.8 % | 79.2 % |
+| META | 114 | 49 | 43.0 % | 20.4 % | 15.2 | 28.6 % | 55.1 % |
+| MSFT | 113 | 21 | 18.6 % | 4.8 % | 13.4 | 38.1 % | 61.9 % |
+| OXY | 116 | 69 | 59.5 % | 11.6 % | 11.8 | 14.5 % | 58.0 % |
+| UNH | 117 | 41 | 35.0 % | 9.8 % | 17.9 | 41.5 % | 63.4 % |
+| **POOL** | 682 | 237 | **34.8 %** | 11.4 % | 15.1 | **28.7 %** | **61.2 %** |
 
 Retornos forward (pool; media / mediana de fills vs linea base):
 
 | Horizonte | n fills | Media fill | Mediana fill | Media base | Mediana base |
 |---|---|---|---|---|---|
-| 20 ruedas | 236 | 2.5 % | 2.2 % | 1.9 % | 2.3 % |
-| 60 ruedas | 236 | 9.0 % | 6.2 % | 5.7 % | 5.1 % |
-| 120 ruedas | 229 | 16.3 % | 12.4 % | 11.1 % | 11.1 % |
-| 252 ruedas | 214 | 30.3 % | 22.6 % | 24.2 % | 22.5 % |
+| 20 ruedas | 237 | 2.5 % | 2.6 % | 1.9 % | 2.3 % |
+| 60 ruedas | 236 | 6.8 % | 6.3 % | 5.7 % | 5.1 % |
+| 120 ruedas | 230 | 13.8 % | 11.1 % | 11.1 % | 11.1 % |
+| 252 ruedas | 215 | 27.8 % | 23.3 % | 24.2 % | 22.5 % |
 
-MAE (pool): a 60 ruedas media -11.8 % / mediana -8.4 % (base: mediana -6.6 %); a 252 ruedas media -21.4 % / mediana -16.3 % (base: mediana -11.9 %).
+MAE (pool): a 60 ruedas media -12.2 % / mediana -9.1 % (base: mediana -6.6 %); a 252 ruedas media -21.1 % / mediana -15.9 % (base: mediana -11.9 %).
 
-Lectura: comprar en el rango mejora la media de retorno frente a la base (+3.3 pp a 60 ruedas, +6.1 pp a 252), pero la
-**mediana a 252 ruedas es casi identica a la base (22.6 % vs 22.5 %)** y la **MAE es sistematicamente peor** (el rango
-"cae" hasta el nivel: se compra tras una caida y el precio sigue cediendo antes de rebotar). OXY muestra mediana negativa a 60/120/252 ruedas.
-La ventaja se concentra en las medias y en META/GOOGL/AAPL/MSFT (tendencia alcista del periodo); no hay evidencia
-estadistica independiente de alfa por si sola.
+Por ticker (mediana de retorno desde el fill a 60 / 120 / 252 ruedas): AAPL 12.2 / 21.5 / 35.3 %; GOOGL 13.8 / 23.9 / 41.9 %; META 3.7 / 8.6 / 27.3 %; MSFT 5.6 / 26.7 / 31.6 %; OXY 0.1 / -2.5 / 3.6 %; UNH 6.3 / 11.7 / 13.7 %. MAE60 mediana por ticker: AAPL -5.7 %, GOOGL -6.7 %, META -14.2 %, MSFT -9.0 %, OXY -9.3 %, UNH -9.7 %.
 
-### 2.4 Nota sobre el tamano de muestra: 236 llenados en 2.3 frente a 237 en la calibracion de 4
+Lectura: comprar en el rango mejora la media de retorno frente a la base (+1.1 pp a 60 ruedas, +3.6 pp a 252), pero la
+**mediana a 252 ruedas esta a menos de 1 pp de la base (23.3 % vs 22.5 %)**, la mediana a 120 ruedas coincide con la base
+(11.1 % vs 11.1 %) y la **MAE es sistematicamente peor** (el rango "cae" hasta el nivel: se compra tras una caida y el
+precio sigue cediendo antes de rebotar; META y UNH tienen MAE60 mediana de -14.2 % y -9.7 %). OXY muestra mediana
+negativa a 120 ruedas y casi nula a 60 y 252. La ventaja se concentra en las medias y en AAPL/GOOGL/MSFT (tendencia alcista del periodo); no hay
+evidencia estadistica independiente de alfa por si sola. Frente al diseno historico (seccion 8) la ventaja en media se
+redujo (+1.1 frente a +3.3 pp a 60 ruedas) y el bounce bajo 5.7 pp en este pool, en parte por una razon mecanica (la
+invalidacion `r_inf x 0.97` esta ahora mas cerca de la entrada); no se interpreta como mejora ni como deterioro
+demostrados.
+
+### 2.4 Nota sobre el tamano de muestra: 237 llenados en 2.3 frente a 236 en la calibracion de 4
 Las dos cifras provienen de filtros distintos sobre las mismas 720 filas de ordenes (6 tickers x 120 fechas):
-* `resumen` (tablas de 2.3) solo cuenta ordenes con rango y **ventana de vida completa** (`ventana_completa`: la barra de colocacion + 63 ruedas existe en los datos): 686 ordenes validas, **236 llenadas**.
-* `evidencia` y `tabla_calibracion` (seccion 4) toman las ordenes llenadas con `ret60` disponible (`llenada & ret60 notna`) y **no filtran por `ventana_completa`**: **237**. La unica diferencia es 1 orden de META colocada el 2026-08-28 y llenada el 2026-08-31: su ventana de 63 ruedas aun no esta completa, pero ya existen 60 ruedas posteriores al llenado, asi que tiene `ret60`. Verificado sobre el cache de ordenes (hay 244 ordenes llenadas en total; las otras 7 sin ventana completa no tienen `ret60` y no entran en ninguno de los dos conteos).
-* Otros n de la seccion 4 son submuestras de esos 237: n = 206 (backtest) exige al menos 5 llenados previos ya resueltos del mismo ticker (historial point-in-time); n = 16 (13F) son trimestres de acumulacion, no ordenes.
+* `resumen` (tablas de 2.3) solo cuenta ordenes con rango y **ventana de vida completa** (`ventana_completa`: la barra de colocacion + 63 ruedas existe en los datos): 682 ordenes validas, **237 llenadas**.
+* `evidencia` y `tabla_calibracion` (seccion 4) toman las ordenes llenadas con `ret60` disponible (`llenada & ret60 notna`) y **no filtran por `ventana_completa`**: **236**. La diferencia con 2.3 es 1 orden de GOOGL colocada el 2026-07-30 y llenada el 2026-09-09: su ventana de vida esta completa, pero tras el llenado aun no existen 60 ruedas, asi que no tiene `ret60` (de ahi tambien n = 236 en la fila de 60 ruedas). Verificado sobre el cache de ordenes: hay 241 ordenes llenadas en total; 4 (1 de META y 3 de GOOGL, ultimas fechas) no tienen ventana completa ni `ret60`. (En el diseno historico la diferencia iba en sentido contrario: 236 frente a 237, por 1 orden de META.)
+* Otros n de la seccion 4 son submuestras de esos 236: n = 205 (backtest) exige al menos 5 llenados previos ya resueltos del mismo ticker (historial point-in-time); n = 16 (13F) son trimestres de acumulacion, no ordenes.
 * La linea base usa todas las fechas de rebalanceo con horizonte disponible, no solo las que generaron un llenado.
 
 ## 3. Casos 13F-HR (`case_studies.py`)
@@ -96,26 +119,30 @@ Las dos cifras provienen de filtros distintos sobre las mismas 720 filas de orde
 * El screener en vivo (`main.py`, `sec_edgar.obtener_13f_ticker`) consulta solo **5 gestores** (`GESTORES_13F`): Berkshire Hathaway, Vanguard Group, State Street, Bridgewater y Renaissance Technologies; es decir, como maximo **3 activos** frente a los 12 de los estudios de caso (los otros 9 solo se usan en `case_studies.py`). La fraccion de gestores que acumulan es por tanto muy gruesa en el screener (0, 1/3, 2/3 o 1) y su universo no coincide con el de la evidencia (n = 16 trimestres) que calibro el peso del componente.
 * Correccion del screener en vivo (contrato de datos vigente): antes de esta correccion Vanguard y State Street **si** contaban como "acumulando" en el screener, lo que era inconsistente con los estudios de caso. Ahora `obtener_13f_ticker` devuelve todas las filas con una columna booleana `pasivo` y los atributos `attrs['consultados']` y `attrs['fallidos']`; `main.py` calcula `n_con_posicion` y `n_acumulando` **solo con gestores activos** y trata el caso "todos los gestores fallaron" como **dato no disponible** (`None`), no como "0 gestores con posicion" (ver 4.2). La definicion de pasivos esta duplicada en `sec_edgar.GESTORES_PASIVOS` y `case_studies.PASIVOS` (por dominio de modulos) y un test de datos comprueba que coincidan.
 
-### 3.2 Resultados (EDGAR disponible: las 16 observaciones de acumulacion estan verificadas con 13F)
+### 3.2 Resultados (EDGAR disponible: las 16 observaciones de acumulacion estan verificadas con 13F; zonas estrechas vigentes)
 
-Berkshire en AAPL (acciones 13F sin ajustar por el split 4:1 de 2020; precios ajustados): 0 -> 9.81 M (Q1 2016), 15.23 M (Q2), 15.23 M (Q3, sin compra), 57.36 M (Q4), 129.36 M (Q1 2017), 130.19 M (Q2), 134.09 M (Q3), 165.33 M (Q4), 239.57 M (Q1 2018). Los rangos PIT del inicio de cada trimestre estaban 20-30 % bajo el precio (p. ej. 2017Q1: 20.1-21.6 vs IQR de ejecucion 27.8-32.1): **0 de 9 trimestres evaluados (0 de 8 con compra neta) solapan** y solo 2016Q2 toco el rango.
+Las compras netas 13F no dependen del algoritmo (son las mismas 16); lo que cambia con las zonas estrechas es el rango PIT contra el que se comparan.
 
-Berkshire en OXY (2022): 0 -> 136.37 M (Q1), 158.55 M (Q2), 194.35 M (Q3), 194.35 M (Q4, sin compra). 0 de 3 trimestres de compra solapan en modo estricto; en modo rodante 2 de 3 (Q1 y Q3), p. ej. 2022Q3 rango PIT 39.7-54.8 vs IQR 56.7-63.2 en estricto.
+Berkshire en AAPL (acciones 13F sin ajustar por el split 4:1 de 2020; precios ajustados): 0 -> 9.81 M (Q1 2016), 15.23 M (Q2), 15.23 M (Q3, sin compra), 57.36 M (Q4), 129.36 M (Q1 2017), 130.19 M (Q2), 134.09 M (Q3), 165.33 M (Q4), 239.57 M (Q1 2018). Los rangos PIT del inicio de cada trimestre estaban 20-30 % bajo el precio (p. ej. 2017Q1: 20.1-21.3 vs IQR de ejecucion 27.8-32.1): **0 de 9 trimestres evaluados (0 de 8 con compra neta) solapan**, ni en modo estricto ni en rodante, y solo 2016Q1 y 2016Q2 tocaron el rango.
 
-Acumulacion institucional Q3-Q4 2022 (variacion neta de gestores activos): META solo Q4 (+1.40 M acciones; en Q3 -4.73 M); MSFT solo Q3 (+0.12 M; Q4 -1.97 M); UNH ambos (+0.59 M, +1.58 M); GOOGL solo Q3 (+5.46 M; Q4 -2.35 M). En META el unico solape estricto fue 2022Q3 (rango 129.3-158.9), trimestre sin compra neta activa.
+Berkshire en OXY (2022): 0 -> 136.37 M (Q1), 158.55 M (Q2), 194.35 M (Q3), 194.35 M (Q4, sin compra). 0 de 3 trimestres de compra solapan en modo estricto; en modo rodante 1 de 3 (Q1; con el diseno historico eran 2 de 3), p. ej. 2022Q3 rango PIT 49.9-52.6 vs IQR 56.7-63.2 en estricto. Q2 y Q3 tocaron el rango pero por debajo de donde se ejecuto.
+
+Acumulacion institucional Q3-Q4 2022 (variacion neta de gestores activos): META solo Q4 (+1.40 M acciones; en Q3 -4.73 M); MSFT solo Q3 (+0.12 M; Q4 -1.97 M); UNH ambos (+0.59 M, +1.58 M); GOOGL solo Q3 (+5.46 M; Q4 -2.35 M). El unico solape estricto en un trimestre con compra neta es **MSFT 2022Q3** (rango PIT 240.7-246.3 vs IQR 242.6-265.1). META 2022Q3 tambien solapa en estricto (150.4-158.4 vs 154.3-166.6) pero fue un trimestre sin compra neta activa y no cuenta. META Q4 y GOOGL Q3 solapan solo en modo rodante (y MSFT Q3 en ambos); UNH no solapa en ningun trimestre (rangos PIT en 342-365 frente a una ejecucion de 450-500).
 
 Agregado (16 trimestres con compra neta):
 
-| Metrica | Valor |
-|---|---|
-| Toque estricto del rango en el trimestre | 18.8 % |
-| Solape estricto con el IQR de ejecucion | 0.0 % |
-| Solape rodante (3 snapshots) | 25.0 % |
-| Solape con algun cluster (no solo el primario) | 12.5 % |
-| Control aleatorio (estricto / rodante) | 7.8 % / 34.8 % |
-| Distancia mediana VWAP del trimestre a cluster mas cercano | 15.2 % |
+| Metrica | Valor (zonas estrechas) | Diseno historico |
+|---|---|---|
+| Toque estricto del rango en el trimestre | 37.5 % (6 de 16) | 18.8 % |
+| Solape estricto con el IQR de ejecucion | 6.2 % (1 de 16) | 0.0 % |
+| Solape rodante (3 snapshots) | 25.0 % (4 de 16) | 25.0 % |
+| Solape con algun cluster (no solo el primario) | 12.5 % | 12.5 % |
+| Control aleatorio (estricto / rodante) | 7.6 % / 29.8 % | 7.8 % / 34.8 % |
+| Distancia mediana VWAP del trimestre a cluster mas cercano | 13.7 % | 15.2 % |
 
-Conclusion: los rangos PIT **no** coinciden mejor que el azar con las zonas de compra de los fondos (rodante 25.0 % vs control 34.8 %). Los fondos compraron cerca del mercado y en tendencia; el algoritmo propone zonas estructurales profundas.
+Conclusion: los rangos PIT **siguen sin coincidir mejor que el azar** con las zonas de compra de los fondos (rodante 25.0 % vs control 29.8 %; estricto 6.2 % vs 7.6 %, con n = 16 y una sola coincidencia estricta). El control baja a 29.8 % porque
+un rango mas estrecho tiene menos probabilidad de solaparse al azar; el solape observado no cambio en cantidad (4 de 16, aunque no
+son exactamente los mismos trimestres). Los fondos compraron cerca del mercado y en tendencia; el algoritmo propone zonas estructurales profundas.
 Retornos desde el VWAP del trimestre a 252 ruedas fueron positivos en la mayoria de casos (p. ej. AAPL +48 % en 2016Q1, META +207 % desde 2022Q4, OXY +35 % en 2022Q1) pero con excepciones (AAPL -14 % en 2017Q4, OXY -3/-6/-12 % en 2022Q2-Q4).
 
 ## 4. Indice de confiabilidad y calibracion (`scoring.py`)
@@ -128,21 +155,25 @@ Pesos: a-priori mezclados 50/50 con w ~ prior * exp(0.5 * clip(z, -3, 3)):
 
 | Componente | Evidencia empirica | z / t | A-priori | Calibrado |
 |---|---|---|---|---|
-| respaldo_13f_form4 | solape rodante 25.0 % vs control 34.8 % (n=16) | -0.82 | 25.0 % | 23.4 % |
-| stock_act | sin serie historica PIT | n/d | 10.0 % | 11.6 % |
-| absorcion | ret60 con absorcion +8.12 % (n=62) vs sin +9.22 % (n=175); bounce 64.5 % vs 68.0 % | -0.36 | 20.0 % | 21.0 % |
-| backtest | Spearman(bounce previo PIT del ticker, bounce actual) = -0.014 (n=206) | -0.19 | 30.0 % | 33.0 % |
-| confluencia | Spearman(n_familias, ret60) = -0.149 (t=-2.30); t(has_logreg, ret60) = -2.10 | -2.10 | 15.0 % | 11.0 % |
+| respaldo_13f_form4 | solape rodante 25.0 % vs control 29.8 % (n=16) | -0.42 | 25.0 % | 20.8 % |
+| stock_act | sin serie historica PIT | n/d | 10.0 % | 9.1 % |
+| absorcion | ret60 con absorcion +10.86 % (n=67) vs sin +5.23 % (n=169); bounce 56.7 % vs 62.7 % | +2.07 | 20.0 % | 33.2 % |
+| backtest | Spearman(bounce previo PIT del ticker, bounce actual) = -0.053 (n=205) | -0.76 | 30.0 % | 23.5 % |
+| confluencia | Spearman(n_familias, ret60) = -0.012 (t=-0.18); t(has_logreg, ret60) = -0.08 | -0.08 | 15.0 % | 13.4 % |
 
-Calibracion del modelo (score PIT = absorcion + historial PIT del ticker + confluencia; n = 237 fills):
+Pesos del diseno historico (zonas anchas, para comparar): respaldo 23.4 %, STOCK Act 11.6 %, absorcion 21.0 %, backtest 33.0 %, confluencia 11.0 % (z = -0.82, n/d, -0.36, -0.19, -2.10).
+
+Calibracion del modelo (score PIT = absorcion + historial PIT del ticker + confluencia; n = 236 fills):
 
 | Tercil | n | Score medio | Bounce | Ret60 media | Ret60 mediana | MAE60 mediana |
 |---|---|---|---|---|---|---|
-| bajo | 79 | 22.5 | 70.9 % | 14.4 % | 10.7 % | -8.0 % |
-| medio | 79 | 41.5 | 65.8 % | 4.8 % | 3.6 % | -8.7 % |
-| alto | 79 | 65.2 | 64.6 % | 7.6 % | 8.1 % | -9.7 % |
+| bajo | 80 | 12.6 | 65.0 % | 4.5 % | 1.4 % | -9.1 % |
+| medio | 77 | 24.7 | 61.0 % | 5.4 % | 5.6 % | -8.7 % |
+| alto | 79 | 66.7 | 57.0 % | 10.6 % | 10.3 % | -10.0 % |
 
-Spearman(score, bounce) = -0.020; Spearman(score, ret60) = -0.028. **El score no discrimina resultados**: ningun componente probado tiene efecto positivo significativo. Los pesos calibrados son por tanto casi los a-priori; no deben interpretarse como evidencia de poder predictivo. El indice sirve como resumen estandarizado de respaldo, no como probabilidad calibrada.
+Spearman(score, bounce) = -0.084; Spearman(score, ret60) = +0.154 (t ingenuo = 2.4 con n = 236, inflado por el solapamiento de ordenes). Diseno historico: -0.020 y -0.028, con terciles de ret60 media 14.4 % / 4.8 % / 7.6 %.
+
+**Cambio de signo respecto al diseno historico, con una lectura que no debe exagerarse.** Con las zonas estrechas el ret60 sube por tercil (media 4.5 % -> 5.4 % -> 10.6 %; mediana 1.4 % -> 5.6 % -> 10.3 %) y la absorcion pasa de efecto ligeramente negativo (z = -0.36) a positivo (z = +2.07, ret60 +10.9 % con absorcion frente a +5.2 % sin ella), de modo que el peso de la absorcion sube de 21.0 % a 33.2 %. Pero: (a) **el bounce sigue yendo en sentido contrario** (el tercil alto tiene el menor bounce, 57.0 %, y la absorcion 56.7 % frente a 62.7 % sin ella; Spearman(score, bounce) = -0.084) y el MAE60 mediana empeora con el score (-9.1 % a -10.0 %); (b) la absorcion se mide en la vela del llenado y las 5 siguientes (seccion 2.2), es decir **despues de la entrada**, no es una senal disponible al colocar la orden: parte de la asociacion con el retorno es contemporanea (una vela de rechazo con volumen es ya un rebote parcial). Comprobacion de robustez hecha para este documento: midiendo el retorno desde el cierre de la 6.a rueda tras el llenado (fuera de la ventana de absorcion) hasta la rueda 60, la diferencia con/sin absorcion queda en +9.5 % frente a +4.5 % (t de Welch = 1.88, p ~ 0.06, n = 67 / 169), y restando la media de cada ticker t = 1.71 (p ~ 0.09), ambas con t inflado por el solapamiento; (c) la diferencia depende de la composicion por ticker (la absorcion es del 14.5 % en OXY y del 45.8 % en GOOGL) y de un solo pool de 6 valores ganadores. Conclusion honesta: **el indice sigue sin discriminar bounce ni MAE y su relacion con el retorno a 60 ruedas, ahora positiva, es debil, no ex-ante y no robusta**; el peso mayor de la absorcion refleja esa asociacion y no debe leerse como poder predictivo demostrado. El indice sirve como resumen estandarizado de respaldo, no como probabilidad calibrada.
 
 ### 4.2 Datos no disponibles no son cero: exclusion, renormalizacion y cobertura
 
@@ -163,15 +194,15 @@ Regla (implementada en `scoring.py`): un dato que **no se pudo obtener** se repr
 | Valoracion consultada sin anclas en la zona (`n_valoracion=0`) | Dato valido: la mitad de valoracion vale 0 y la confluencia es `100 x clip(0.6 x (n_familias - 1) / 3 + 0.4 x min(1, n_valoracion / 2), 0, 1)` (formula completa sin cambios; el valor por defecto de `n_valoracion` sigue siendo 0). |
 | `n_familias=None` (sin zona) | `confluencia` = None: componente excluido. |
 
-Cuando las dos mitades de `respaldo_13f_form4` existen, cada una pesa 50 %; con una sola, esa pesa 100 % del componente. Esto **no** cambia la cobertura (el componente sigue presente), aunque descanse en la mitad de la informacion. Lo mismo ocurre con la valoracion no consultada: `confluencia` sigue presente con solo su parte de familias (reescalada), la cobertura no baja y el componente descansa en menos informacion. Como la parte de familias se reescala, una zona con la valoracion **no consultada** puede puntuar mas en confluencia que la misma zona con la valoracion **consultada y sin anclas** (p. ej. 3 familias: 66.7 frente a 40.0); por eso la confluencia (y el ranking, donde pesa ~55.5 %) tampoco es comparable entre tickers con valoracion consultada y no consultada.
+Cuando las dos mitades de `respaldo_13f_form4` existen, cada una pesa 50 %; con una sola, esa pesa 100 % del componente. Esto **no** cambia la cobertura (el componente sigue presente), aunque descanse en la mitad de la informacion. Lo mismo ocurre con la valoracion no consultada: `confluencia` sigue presente con solo su parte de familias (reescalada), la cobertura no baja y el componente descansa en menos informacion. Como la parte de familias se reescala, una zona con la valoracion **no consultada** puede puntuar mas en confluencia que la misma zona con la valoracion **consultada y sin anclas** (p. ej. 3 familias: 66.7 frente a 40.0); por eso la confluencia (y el ranking, donde pesa ~56.7 %) tampoco es comparable entre tickers con valoracion consultada y no consultada.
 
-**Cobertura** (`calcular_indice_confiabilidad`): suma de los pesos de los componentes con dato dividida por la suma de todos los pesos. 100 % = los cinco componentes presentes; baja cuando falta alguno (con los pesos calibrados vigentes, sin STOCK Act = 100 % - 11.6 % = 88.4 %; sin SEC = 65.0 %; sin backtest = 46.0 %). Mide cuanta parte del modelo tuvo dato, no la calidad de esos datos. Con cobertura baja el indice es el promedio de lo poco disponible y no es comparable con el de otro ticker con cobertura distinta. Un componente con valor 0 no baja la cobertura (es un dato); solo los ausentes la bajan. La cobertura no se infla con ceros ni neutros: un fallo de STOCK Act, Form 4, 13F o valoracion la reduce o deja el componente con menos informacion, nunca la sube.
+**Cobertura** (`calcular_indice_confiabilidad`): suma de los pesos de los componentes con dato dividida por la suma de todos los pesos. 100 % = los cinco componentes presentes; baja cuando falta alguno (con los pesos calibrados vigentes, sin STOCK Act = 100 % - 9.1 % = 90.9 %; sin SEC (13F/Form 4 y STOCK Act) = 70.1 %; sin backtest (backtest y absorcion) = 43.4 %). Mide cuanta parte del modelo tuvo dato, no la calidad de esos datos. Con cobertura baja el indice es el promedio de lo poco disponible y no es comparable con el de otro ticker con cobertura distinta. Un componente con valor 0 no baja la cobertura (es un dato); solo los ausentes la bajan. La cobertura no se infla con ceros ni neutros: un fallo de STOCK Act, Form 4, 13F o valoracion la reduce o deja el componente con menos informacion, nunca la sube.
 
 Excepciones (i y iii residuales, no corregidas aqui; ii corregida): (i) dentro del componente `backtest`, si hay bounce pero faltan los medianos de retorno o MAE a 60 ruedas se usan 0 y 0.5 (neutro) respectivamente; (ii) valoracion: **corregida**. Antes, si fallaba la etapa de valoracion (`calcular_pisos_valoracion`), la mitad de valoracion de la confluencia (40 %) puntuaba 0 como si se hubiera consultado y no hubiera anclas. Ahora `s_confluencia` acepta `n_valoracion=None` (valoracion no consultada: se excluye esa mitad y se reescala la de familias) y distingue `0` (consultada, sin anclas en la zona: dato valido que puntua 0); `indice_desde_modulos` lo pasa tal cual; (iii) el screener en vivo compara los dos ultimos 13F-HR sin ajustar por splits (`case_studies.py` si ajusta), de modo que un split entre ambos trimestres puede aparecer como acumulacion o reduccion espuria.
 
 ## 5. Limitaciones
 
-* Muestra: 6 tickers de gran capitalizacion, 10 anios mayormente alcistas, sesgo de supervivencia (se eligieron tickers ganadores). Ordenes mensuales con vida de 63 ruedas se solapan: las observaciones no son independientes y los t-stat estan inflados.
+* Muestra: 6 tickers de gran capitalizacion, 10 anios mayormente alcistas, sesgo de supervivencia (se eligieron tickers ganadores). Ordenes mensuales con vida de 63 ruedas se solapan: las observaciones no son independientes y los t-stat estan inflados. Los parametros de ancho de zona se eligieron con un A/B sobre un pool que incluye estos 6 tickers y se evaluan en el mismo pool (seccion 8).
 * Precios ajustados (`auto_adjust`): los niveles son coherentes en la serie ajustada, pero el ajuste por dividendos usa informacion posterior (distorsion pequena).
 * Pisos de valoracion XBRL (P/E, EV/FCF, DCF) y el AVWAP al 10-K no se auditaron (no son PIT): su aporte empirico queda sin medir; `confluencia` solo usa log-regresion como ancla de valoracion.
 * 13F: sin fecha de ejecucion (proxy de precio del trimestre, amplio), informacion rezagada hasta 45 dias, no incluye posiciones cortas ni no-EE. UU.; cambios agregados mezclan flujos de clientes; en los estudios de caso los gestores pasivos (`Vanguard Group`, `State Street`) se excluyen del flag y el screener en vivo, tras la correccion, tambien los excluye del conteo de "acumulando" (ver el aviso de 3.1; el screener consulta solo 5 gestores, como maximo 3 activos). Solo 16 trimestres: muestra muy pequena. El control Monte Carlo es un modelo simple.
@@ -179,15 +210,15 @@ Excepciones (i y iii residuales, no corregidas aqui; ii corregida): (i) dentro d
 * Sin red: EDGAR (13F, Form 4) y STOCK Act dejan de estar disponibles y sus componentes se **excluyen** del indice (la cobertura baja; no se cuentan como cero ni como neutro, ver 4.2); el backtest de rangos y los proxies de precio solo requieren yfinance.
 * Costos de transaccion, impuestos y liquidez no modelados; Form 4 y STOCK Act no se probaron empiricamente por falta de series PIT.
 * Las metricas por ticker del screener no son comparables con las del pool (ver 6.1).
-* **Diseno frente a evidencia (decision abierta).** El reparto de capital (`asignar_capital`: capital x `n_familias` de la zona / suma de `n_familias` de las 3 primeras zonas), el orden N1-N4 (mas familias, luego mas anclas, luego mas cercana) y el ranking de la watchlist dependen de `n_familias` / confluencia. La calibracion propia (seccion 4) **no** hallo que mas familias mejoren el retorno a 60 ruedas: Spearman(n_familias, ret60) = -0.149 (t = -2.30, ademas t inflado por el solapamiento de ordenes), y t(has_logreg, ret60) = -2.10; es el componente con la peor evidencia. Aun asi la confluencia pesa **~55.5 %** del score de ranking: `ranking = 0.5 x confluencia + 0.5 x confiabilidad`, y la confluencia es tambien un componente de la confiabilidad, de modo que su peso total es 0.5 + 0.5 x 0.1096 = 0.5548 (con el peso calibrado 0.1096 de `pesos_calibrados.json` y cobertura 100 %). Con componentes ausentes los pesos se renormalizan y su peso sube (56.2 % sin STOCK Act; 58.4 % con `--sin-sec`; 61.9 % con `--sin-backtest`; 100 % si es el unico componente con dato). **No se modificaron las formulas** (reparto, orden ni ranking): la evidencia desfavorable a la confluencia no respalda por si misma ninguna alternativa concreta (tampoco el resto de componentes discrimina, ver 4.1) y cambiarlas sin evidencia a favor seria arbitrario. Es una decision de diseno abierta que debe reevaluarse con series PIT de valoracion y mas tickers/periodos; hasta entonces, el reparto por familias y el ranking son un criterio de organizacion, no un resultado respaldado empiricamente.
+* **Diseno frente a evidencia (decision abierta).** El reparto de capital (`asignar_capital`: capital x `n_familias` de la zona / suma de `n_familias` de las 3 primeras zonas), el orden N1-N4 (mas familias, luego mas anclas, luego mas cercana) y el ranking de la watchlist dependen de `n_familias` / confluencia. La calibracion propia (seccion 4), recalculada con las zonas estrechas, **no** halla que mas familias mejoren el retorno a 60 ruedas: Spearman(n_familias, ret60) = -0.012 (t = -0.18) y t(has_logreg, ret60) = -0.08, es decir ausencia de efecto detectable (con el diseno historico la relacion era negativa: -0.149, t = -2.30, y -2.10; **la senal negativa desaparecio**, pero no aparecio una positiva). Ademas las zonas estrechas **reducen mucho la confluencia observada**: las ordenes con >= 3 familias bajan de 40.3 % (284 de 704) a 9.4 % (66 de 700) y las que incluyen log-reg de 15.5 % a 7.6 %, porque anclas mas angostas se solapan menos. Aun asi la confluencia pesa **~56.7 %** del score de ranking: `ranking = 0.5 x confluencia + 0.5 x confiabilidad`, y la confluencia es tambien un componente de la confiabilidad, de modo que su peso total es 0.5 + 0.5 x 0.1342 = 0.5671 (con el peso calibrado 0.1342 de `pesos_calibrados.json` y cobertura 100 %; antes 0.5548 con 0.1096). Con componentes ausentes los pesos se renormalizan y su peso sube (57.4 % sin STOCK Act; 59.6 % con `--sin-sec`; 65.5 % con `--sin-backtest`; 100 % si es el unico componente con dato). **No se modificaron las formulas** (reparto, orden ni ranking): que la evidencia desfavorable haya pasado a nula no respalda por si misma ninguna alternativa concreta (tampoco el resto de componentes discrimina bounce, ver 4.1) y cambiarlas sin evidencia a favor seria arbitrario. Es una decision de diseno abierta que debe reevaluarse con series PIT de valoracion y mas tickers/periodos; hasta entonces, el reparto por familias y el ranking son un criterio de organizacion, no un resultado respaldado empiricamente.
 
 ## 6. Screener en vivo (`main.py`) frente a las cifras auditadas
 
 ### 6.1 Que audita el screener y por que sus metricas no son comparables con el pool
-Las cifras de las secciones 2 a 4 (686 ordenes, 236 llenadas, 34.4 % de llenado, 66.9 % de bounce, etc.) son del **pool**: 6 tickers (AAPL, MSFT, META, OXY, GOOGL, UNH) a **10 anios**, 120 fechas de rebalanceo por ticker, con el historial completo (`"max"`) de yfinance. El screener (`python main.py --ticker T`) calcula un backtest distinto por ticker:
+Las cifras de las secciones 2 a 4 (682 ordenes, 237 llenadas, 34.8 % de llenado, 61.2 % de bounce, etc.) son del **pool**: 6 tickers (AAPL, MSFT, META, OXY, GOOGL, UNH) a **10 anios**, 120 fechas de rebalanceo por ticker, con el historial completo (`"max"`) de yfinance. El screener (`python main.py --ticker T`) calcula un backtest distinto por ticker:
 * **Duracion:** `--anios-backtest` vale **5 por defecto** (`backtest_ticker(ticker, 5, df=df)`), es decir unas **60 fechas mensuales** por ticker (5 x 252 / 21 = 60, cada 21 ruedas), sobre el historial de `--periodo` (10y por defecto) y no sobre el historial completo.
 * **Alcance:** solo se audita el **rango primario (N1)** (`rango_primario`: mas familias, luego mas anclas, luego mas cercano; es la misma regla con la que se ordena N1). Las zonas N2-N4 y el reparto de capital entre zonas **no** se auditan.
-* **Muestra pequena:** descontando las ultimas ~3 fechas sin ventana de vida completa y las fechas sin rango, quedan del orden de 55-57 ordenes por ticker; con las tasas de llenado por ticker del pool (17.7 %-58.1 %), eso son aproximadamente 10 a 33 llenados (estimacion de orden de magnitud, no medida), y menos aun para los horizontes largos por la censura por derecha (las ordenes de los ultimos 12 meses no tienen retorno a 252 ruedas). Con ~10-20 llenados el error estandar binomial de un bounce rate ronda 10-15 puntos porcentuales antes de contar el solapamiento entre ordenes consecutivas, que lo aumenta.
+* **Muestra pequena:** descontando las ultimas ~3 fechas sin ventana de vida completa y las fechas sin rango, quedan del orden de 55-57 ordenes por ticker; con las tasas de llenado por ticker del pool (18.6 %-59.5 %), eso son aproximadamente 10 a 33 llenados (estimacion de orden de magnitud, no medida), y menos aun para los horizontes largos por la censura por derecha (las ordenes de los ultimos 12 meses no tienen retorno a 252 ruedas). Con ~10-20 llenados el error estandar binomial de un bounce rate ronda 10-15 puntos porcentuales antes de contar el solapamiento entre ordenes consecutivas, que lo aumenta.
 * **Consecuencia:** Fill Rate, Bounce, retornos y MAE por ticker del screener son **mas ruidosos** y **no son comparables** con las cifras del pool (otro universo, otra ventana y otro tamano de muestra); ni siquiera son comparables entre dos tickers del propio screener con distinto numero de llenados. Son una referencia de la historia reciente de ese activo, no una estimacion de la distribucion del pool.
 * El componente `backtest` y el componente `absorcion` del indice del screener se alimentan de esa misma muestra pequena (ver 4.2 para su tratamiento cuando no hay llenados).
 
@@ -209,3 +240,59 @@ Documentacion (este archivo), cada punto verificado contra el codigo; no se modi
 * 6.2: modo batch, capital completo por ticker.
 
 Codigo (`src/validation/scoring.py`): `cargar_pesos` y `main()` cierran los ficheros (`with open`); `s_13f` promedia solo las mitades con dato (gestores activos / Form 4) reponderando 50/50 entre las disponibles y devuelve `None` sin ninguna; `s_stock_act` y `calcular_indice_confiabilidad` tratan `None`/NaN como dato no disponible; `indice_desde_modulos` excluye `stock_act` con `pts=None` o `disponible=False`, acepta `respaldo13f` con claves `None` y `n_valoracion=None` (se pasa tal cual a `s_confluencia`); `s_confluencia` acepta `n_valoracion=None` (ver arriba); se documenta `cobertura`. Pruebas en `tests/test_scoring_fixes.py`.
+
+## 8. Reduccion del ancho de zonas (2026-11-26)
+
+Peticion: zonas mas estrechas y precisas. Esta seccion es la unica que conserva las cifras del **diseno historico** (`PARAMS_HISTORICOS`: cluster <= 3 ATR, sin tope %, anclas sin acotar, HVN y OB completos, cualquier solape con la banda) frente al **diseno vigente**.
+
+### 8.1 Diagnostico
+El ancho de los rangos primarios no venia sobre todo de la fusion en cadena de anclas puntuales, sino de **anclas con rango propio**: los HVN (mediana de 3.6 ATR semanal de ancho como nodo completo) y los Order Blocks, que por si solos ya consumian o superaban el tope de 3 ATR. La fusion en cadena era un factor secundario. Por eso el cambio actua sobre las anclas (HVN = pico +- 0.5 ATR, OB <= 1.0 ATR conservando el techo, anclas acotadas al tope, descarte de astillas fuera de la banda) y solo despues reduce el tope del cluster (2 ATR y 5 %). El nucleo del cluster (`NUCLEO_OPERATIVO`) se implemento pero no se activo.
+
+### 8.2 Antes / despues
+A/B walk-forward sobre 32 tickers (28 de las listas A/B mas la watchlist) x 10 anios, medido por el agente de zonas (`tests/test_zonas_precision.py` fija propiedades estructurales, no estas cifras):
+
+| Metrica (32 tickers) | Diseno historico | Vigente | Diferencia |
+|---|---|---|---|
+| Ancho del rango primario, mediana (% del precio) | 6.1 % | 4.0 % | -2.1 pp |
+| Ancho del rango primario, p90 | 14.4 % | 5.0 % | -9.4 pp |
+| Fill rate | 36.2 % | 32.5 % | -3.7 pp (IC95 [-5.5, -2.0]) |
+| Bounce (+5 %/20d) | referencia | -2.2 pp | en parte mecanico |
+| MAE60 | referencia | 0.4 pp peor | dentro del ruido |
+| Retornos a 60/120/252 ruedas | referencia | sin diferencia detectable | |
+| Dias hasta el llenado | referencia | +2.8 | |
+
+Pool documentado (6 tickers, 10 anios; recalculado con las mismas funciones; las cifras del diseno historico salen del respaldo de las cachés anteriores):
+
+| Metrica (pool de 6) | Diseno historico | Vigente |
+|---|---|---|
+| Ordenes validas / llenadas | 686 / 236 | 682 / 237 |
+| Fechas sin rango | 16 de 720 | 20 de 720 |
+| Ancho primario mediana / p90 / media | 5.9 % / 16.0 % / 7.7 % | 3.8 % / 5.0 % / 3.7 % |
+| Distancia mediana del rango al precio | 14.3 % | 13.7 % |
+| Ordenes con >= 3 familias | 40.3 % | 9.4 % |
+| Fill rate | 34.4 % | 34.8 % |
+| Fill profundo (<= r_inf) | 5.9 % | 11.4 % |
+| Dias a fill | 14.4 | 15.1 |
+| Absorcion | 26.3 % | 28.7 % |
+| Bounce | 66.9 % | 61.2 % |
+| Ret. media / mediana 60 ruedas | 9.0 % / 6.2 % | 6.8 % / 6.3 % |
+| Ret. media / mediana 120 ruedas | 16.3 % / 12.4 % | 13.8 % / 11.1 % |
+| Ret. media / mediana 252 ruedas | 30.3 % / 22.6 % | 27.8 % / 23.3 % |
+| MAE60 media / mediana | -11.8 % / -8.4 % | -12.2 % / -9.1 % |
+| MAE252 media / mediana | -21.4 % / -16.3 % | -21.1 % / -15.9 % |
+| 13F: solape estricto / rodante / toque | 0.0 % / 25.0 % / 18.8 % | 6.2 % / 25.0 % / 37.5 % |
+| 13F: control rodante | 34.8 % | 29.8 % |
+| Spearman(score, bounce) / (score, ret60) | -0.020 / -0.028 | -0.084 / +0.154 |
+| Peso calibrado (respaldo / STOCK / absorcion / backtest / confluencia) | 23.4 / 11.6 / 21.0 / 33.0 / 11.0 % | 20.8 / 9.1 / 33.2 / 23.5 / 13.4 % |
+
+### 8.3 Como leerlo
+* Es una **reduccion de ancho sin perdida de calidad detectable**, no una mejora demostrada de rendimiento. El ancho cae de forma clara y robusta (la mediana y, sobre todo, la cola: p90 de 14.4 % a 5.0 %); los retornos y el MAE60 no cambian de forma distinguible del ruido.
+* **Trade-off de fill:** zonas mas estrechas y mas cercanas a la estructura se tocan menos (-3.7 pp en 32 tickers, IC95 [-5.5, -2.0], distinto de cero) y tardan mas (+2.8 dias). En el pool de 6 el fill no cambia (34.4 % -> 34.8 %), lo que ilustra que el efecto depende del universo.
+* **Bounce:** baja 2.2 pp en 32 tickers y 5.7 pp en el pool de 6. Parte es mecanica: la invalidacion (`r_inf x 0.97`) esta mas cerca de la entrada y un rango estrecho tiene menos holgura. No debe compararse el bounce entre disenos como si fuese el mismo experimento.
+* En el pool de 6, las medias de retorno bajan (60 ruedas 9.0 % -> 6.8 %; 252, 30.3 % -> 27.8 %) y las medianas apenas se mueven (252: 22.6 % -> 23.3 %); con n ~ 215-237 solapados y 6 tickers, eso es compatible con ruido. La ventaja en media frente a la linea base se acorta (+3.3 -> +1.1 pp a 60 ruedas, +6.1 -> +3.6 pp a 252).
+* **Efectos secundarios:** la confluencia observable cae mucho (>= 3 familias: 40 % -> 9 %), porque las anclas estrechas se solapan menos; el indice, el reparto por familias y el ranking dependen de ello (ver 5). El score cambia de signo en Spearman con ret60 (-0.028 -> +0.154) pero no con bounce (-0.084), con las salvedades de 4.1 (la absorcion es post-entrada).
+
+### 8.4 Chequeos y limitaciones
+Chequeos (cubiertos por `tests/test_zonas_precision.py`): ningun cluster supera el tope de ancho (ATR y %); una ancla mas ancha que el tope se acota y el OB conserva su techo; las astillas fuera de la banda se descartan; una cadena de anclas solapadas no forma una zona enorme; los rangos del backtest no dependen del futuro (`df.iloc[:i+1]`); `params_zonas(**PARAMS_HISTORICOS)` reproduce el comportamiento anterior. Ningun nivel depende del cierre del dia: todas las anclas siguen siendo perfil de volumen, swing lows, AVWAP, OB o log-reg.
+
+Limitaciones: (1) **sesgo de supervivencia**: tickers elegidos ex post, 10 anios alcistas; (2) **el mismo pool sirve para elegir y para evaluar**: los parametros se fijaron con el A/B sobre estos datos (los 6 del pool estan dentro de los 32), por lo que las cifras vigentes estan favorecidas por seleccion; no hay conjunto reservado (hold-out); (3) **solapamiento de ordenes**: ordenes mensuales con vida de 63 ruedas y retornos a 252 ruedas no son independientes y los intervalos y t-stat estan subestimados; (4) **parametros fijados por A/B**, no optimizados formalmente ni validados fuera de muestra; las diferencias de MAE y retorno de unas decimas de pp no son distinguibles del ruido; (5) la calibracion de pesos (4.1) usa el mismo pool y las mismas ordenes, y la absorcion que alimenta su mayor peso se observa despues de la entrada; (6) el pool de 6 y el A/B de 32 no son el mismo experimento (distinto universo), por eso difieren las cifras de fill y bounce.

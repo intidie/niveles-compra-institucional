@@ -307,6 +307,16 @@ def distancia_zona(z: dict, precio_actual: float | None = None) -> float | None:
     return d if d is not None else _num(z.get("dist_pct"))
 
 
+def ancho_zona_pct(z: dict, precio_actual: float | None = None) -> float | None:
+    """Ancho (r_sup - r_inf) en % del precio actual (o del centro de la zona si no hay precio)."""
+    try:
+        ref = precio_actual if precio_actual and precio_actual > 0 else float(z.get("p_centro") or
+                                                                             (z["r_inf"] + z["r_sup"]) / 2)
+        return (float(z["r_sup"]) - float(z["r_inf"])) / ref * 100.0 if ref > 0 else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def filas_tabla(zonas: list[dict], backtest_resumen: dict | None = None,
                 precio_actual: float | None = None) -> list[dict]:
     """Filas para la tabla de zonas (valores numericos para ordenar; None -> 'n/d' en la plantilla)."""
@@ -318,7 +328,7 @@ def filas_tabla(zonas: list[dict], backtest_resumen: dict | None = None,
             "id": int(z.get("nivel", len(filas) + 1)), "nivel": f"N{z.get('nivel', len(filas) + 1)}",
             "r_inf": float(z["r_inf"]), "r_sup": float(z["r_sup"]),
             "p_centro": float(z.get("p_centro", (z["r_inf"] + z["r_sup"]) / 2)),
-            "dist_pct": dist, "familias": ", ".join(z.get("familias", [])),
+            "ancho_pct": ancho_zona_pct(z, precio_actual), "dist_pct": dist, "familias": ", ".join(z.get("familias", [])),
             "bounce": aud["bounce"], "fill_rate": aud["fill_rate"], "mae": aud["mae"],
             "capital": float(z.get("capital_asignado", 0.0)), "acciones": float(z.get("acciones", 0.0)),
             "entrada": float(z["r_sup"]) if z.get("acciones", 0.0) > 0 else None})
@@ -612,13 +622,16 @@ class CacheLRU(OrderedDict):
 FECHA_AUDITORIA = "2026-11-26"  # fecha de los datos de docs/METODOLOGIA.md
 # Cifras de la auditoria (docs/METODOLOGIA.md, formato del documento). Un test comprueba que cada una siga en el .md.
 CIFRAS_AUDITORIA: dict[str, str] = {
-    "n_calibracion": "237", "spearman_bounce": "-0.020", "spearman_ret60": "-0.028",
-    "tercil_bajo_bounce": "70.9 %", "tercil_alto_bounce": "64.6 %",
-    "tercil_bajo_ret60": "14.4 %", "tercil_alto_ret60": "7.6 %",
-    "n_ordenes": "686", "n_fills": "236", "fill_pool": "34.4 %", "bounce_pool": "66.9 %", "absorcion_pool": "26.3 %",
-    "mediana252_fill": "22.6 %", "mediana252_base": "22.5 %", "media_pp60": "+3.3", "media_pp252": "+6.1",
-    "mae60_mediana": "-8.4 %", "mae60_base": "-6.6 %", "mae252_mediana": "-16.3 %", "mae252_base": "-11.9 %",
-    "solape_rodante": "25.0 %", "solape_control": "34.8 %", "solape_estricto": "0.0 %", "n_trimestres_13f": "16",
+    "n_calibracion": "236", "spearman_bounce": "-0.084", "spearman_ret60": "+0.154",
+    "tercil_bajo_bounce": "65.0 %", "tercil_medio_bounce": "61.0 %", "tercil_alto_bounce": "57.0 %",
+    "tercil_bajo_ret60": "4.5 %", "tercil_medio_ret60": "5.4 %", "tercil_alto_ret60": "10.6 %",
+    "mae60_tercil_bajo": "-9.1 %", "mae60_tercil_alto": "-10.0 %",
+    "n_ordenes": "682", "n_fills": "237", "fill_pool": "34.8 %", "bounce_pool": "61.2 %", "absorcion_pool": "28.7 %",
+    "mediana252_fill": "23.3 %", "mediana252_base": "22.5 %", "media_pp60": "+1.1", "media_pp252": "+3.6",
+    "mae60_mediana": "-9.1 %", "mae60_base": "-6.6 %", "mae252_mediana": "-15.9 %", "mae252_base": "-11.9 %",
+    "solape_rodante": "25.0 %", "solape_control": "29.8 %", "solape_estricto": "6.2 %", "n_trimestres_13f": "16",
+    "fill_32_pp": "-3.7 pp", "fam3_antes": "40.3 %", "fam3_ahora": "9.4 %",
+    "abs_ret_con": "+9.5 %", "abs_ret_sin": "+4.5 %", "abs_p": "0.06",
 }
 ETIQUETAS_COMPONENTES = {"respaldo_13f_form4": "Respaldo 13F / Form 4", "stock_act": "STOCK Act (Congreso)",
                          "absorcion": "Absorción", "backtest": "Backtest", "confluencia": "Confluencia"}
@@ -694,7 +707,8 @@ def _parametros() -> dict[str, Any]:
         "bounce_pct": br.BOUNCE_PCT, "bounce_ventana": br.BOUNCE_VENTANA, "bounce_inval": br.BOUNCE_INVALIDA,
         "vol_mult": br.VOL_MULT_ABS, "ventana_abs": br.VENTANA_ABS,
         "velas_abs": br.VENTANA_ABS + 1,  # range(k, k + VENTANA_ABS + 1): la vela del toque cuenta
-        "ancho_cluster_atr": br.ANCHO_MAX_CLUSTER_ATR,
+        "ancho_cluster_atr": br.ANCHO_MAX_CLUSTER_ATR, "ancho_cluster_pct": br.ANCHO_MAX_CLUSTER_PCT,
+        "nucleo_operativo": br.NUCLEO_OPERATIVO,
         "tickers_bt": list(br.TICKERS_DEFECTO), "anios_bt_ref": br.ANIOS_BACKTEST,
         "vp_anios": vl.VP_ANIOS, "value_area": vl.VALUE_AREA_PCT, "swing_semanas": vl.OB_SWING_SEMANAL,
         "correccion": vl.CORRECCION_MAYOR_PCT, "avwap_dias": vl.AVWAP_MIN_ESTRUCTURAL_DIAS,
@@ -792,7 +806,7 @@ def _seccion_logica(p: dict[str, Any]) -> dict:
             f"Order Blocks semanales (`order_blocks_semanales`), AVWAP, mínimos semanales y regresión logarítmica. "
             f"Solo usan datos hasta hoy.",
             f"**3. Confluencia y clusters.** Agrupa las anclas cercanas en zonas (`calcular_zonas_pit`; ancho máximo "
-            f"{_es(p['ancho_cluster_atr'], 0)} ATR semanales) y las numera N1 a N{p['max_zonas']} por cuántas familias "
+            f"{_es(p['ancho_cluster_atr'], 0)} ATR semanales y {pct0(p['ancho_cluster_pct'])} % del precio) y las numera N1 a N{p['max_zonas']} por cuántas familias "
             f"distintas coinciden.",
             "**4. Valoración.** Compara el precio con los múltiplos históricos de la propia empresa (P/E, EV/FCF), un "
             "DCF conservador y la banda de regresión (`calcular_pisos_valoracion`). Cuenta cuántas de esas líneas "
@@ -848,9 +862,13 @@ def _seccion_logica(p: dict[str, Any]) -> dict:
         "con el ruido diario.",
         "**Lo demostrado (auditoría propia, `docs/METODOLOGIA.md`):**",
         {"lista": [
-            f"El índice de confiabilidad **no discrimina resultados**: correlación con el rebote {f('spearman_bounce')} y "
-            f"con el retorno a 60 ruedas {f('spearman_ret60')} ({f('n_calibracion')} órdenes). El tercio de mayor score "
-            f"rebotó {f('tercil_alto_bounce')} y el de menor score {f('tercil_bajo_bounce')}.",
+            f"El índice de confiabilidad **no discrimina resultados en conjunto** (con las zonas estrechas el "
+            f"panorama es matizado): correlación con el retorno a 60 ruedas {f('spearman_ret60')}, pero con el rebote "
+            f"{f('spearman_bounce')} ({f('n_calibracion')} órdenes). Por terciles de score, el rebote baja "
+            f"({f('tercil_bajo_bounce')}, {f('tercil_medio_bounce')}, {f('tercil_alto_bounce')}), la MAE a 60 ruedas "
+            f"empeora ({f('mae60_tercil_bajo')} a {f('mae60_tercil_alto')}) y el retorno medio a 60 ruedas sube "
+            f"({f('tercil_bajo_ret60')}, {f('tercil_medio_ret60')}, {f('tercil_alto_ret60')}). Esa subida es débil y "
+            f"no ex-ante (ver el aviso sobre la absorción en Limitaciones). No es una probabilidad.",
             f"La **mediana a 252 ruedas** de comprar en el rango ({f('mediana252_fill')}) es casi idéntica a la línea base "
             f"({f('mediana252_base')}). Solo la media mejora (+{f('media_pp60')[1:]} puntos a 60 ruedas), y se concentra en "
             f"acciones que subieron en el período.",
@@ -999,10 +1017,31 @@ def contenido_modelo() -> list[dict]:
             f"cálculo de las zonas (no se pueden auditar sin «mirar el futuro»): se dibujan como líneas doradas y "
             f"cuentan como una familia extra donde caen dentro de una zona (±2 %)."]},
         {"ejemplo": f"**N1 a N{p['max_zonas']}:** las anclas cercanas se agrupan en una zona mientras su ancho no pase de "
-                    f"{_es(p['ancho_cluster_atr'], 0)} veces el rango semanal típico de la acción (ATR). Se guardan como "
+                    f"{_es(p['ancho_cluster_atr'], 0)} veces el rango semanal típico de la acción (ATR) ni del "
+                    f"{pct0(p['ancho_cluster_pct'])} % del precio. Se guardan como "
                     f"máximo {p['max_zonas']} zonas, numeradas por fuerza: N1 es la que tiene más familias coincidentes; "
                     "si empatan, la que tiene más anclas; si vuelven a empatar, la más cercana al precio. N1 es la más "
                     "respaldada, no necesariamente la más cercana."},
+        f"**Por qué las zonas son ahora más estrechas.** Antes un nodo de volumen (HVN) o un Order Block entraba en la "
+        f"zona con todo su ancho y a veces una sola ancla ocupaba más del 6 % del precio. Ahora cada ancla se acota a su "
+        f"parte más relevante (un HVN, a su pico más o menos 0,5 ATR; un Order Block, a 1 ATR desde su techo), el ancho "
+        f"máximo de una zona es {_es(p['ancho_cluster_atr'], 0)} ATR y {pct0(p['ancho_cluster_pct'])} % del precio, y "
+        f"las anclas que quedan sobre el precio o que tienen menos de la mitad de su rango dentro de la banda de "
+        f"búsqueda se descartan. También se calcula un «núcleo» aún más estrecho de cada zona, pero "
+        + ("**está activo como rango operativo**." if p["nucleo_operativo"] else
+           "**no se usa como rango operativo** (solo queda disponible en los datos)."),
+        {"ejemplo": "**Ejemplo REAL con fecha 2026-11-25 (NVDA, solo ilustra el efecto; no es una recomendación):** "
+                    "antes, N1 era 104,51 a 114,81 USD y aparecía además una AVWAP por encima del precio; ahora hay un "
+                    "único N1 de 107,35 a 114,81 USD. La zona es más corta y no incluye anclas que el precio ya dejó "
+                    "atrás."},
+        {"aviso": f"**El costo, honestamente:** una zona más estrecha se toca menos. En la auditoría con 32 tickers el "
+                  f"fill rate bajó {_c('fill_32_pp')}; en el pool de 6 no cambió ({_c('fill_pool')}). La calidad medida (retornos "
+                  f"y MAE) no empeoró de forma distinguible del ruido, pero tampoco hay una mejora demostrada: la "
+                  f"ventaja es precisión del rango, no mejor rendimiento."},
+        f"**Menos familias coincidiendo.** Como las anclas son más angostas se solapan menos: las órdenes con 3 o más "
+        f"familias pasaron de {_c('fam3_antes')} a {_c('fam3_ahora')}. Los valores altos de confluencia son ahora "
+        f"**raros**; lo normal es una zona de 1 o 2 familias y a veces solo hay 1 o 2 zonas por activo. Eso cambia la "
+        f"escala del score de confluencia, del reparto de capital por familias y del ranking de la Watchlist.",
         "**Confluencia** es cuántas familias *distintas* coinciden en la misma zona. Ejemplo: una zona de 95 a 98 USD "
         "donde coinciden Volume Profile, AVWAP y un Order Block (3 familias) tiene más respaldo estructural que una "
         "zona de 80 a 82 USD donde solo hay un mínimo semanal (1 familia). Ojo: más coincidencias significan más "
@@ -1161,14 +1200,23 @@ def contenido_modelo() -> list[dict]:
     lim: list[Any] = [
         {"aviso": AVISO_LEGAL},
         {"lista": [
-            f"**La Confiabilidad NO es una probabilidad ni ha mostrado poder predictivo.** En la calibración propia "
-            f"({_c('n_calibracion')} órdenes ejecutadas) la correlación de Spearman entre el score y el bounce fue "
-            f"{_c('spearman_bounce')}, y entre el score y el retorno a 60 ruedas, {_c('spearman_ret60')}: en la "
-            f"práctica, cero. El tercio de score más alto tuvo un bounce de {_c('tercil_alto_bounce')} y el más bajo "
-            f"de {_c('tercil_bajo_bounce')}; el retorno medio a 60 ruedas fue {_c('tercil_alto_ret60')} contra "
-            f"{_c('tercil_bajo_ret60')}. El score no discrimina resultados: ningún componente probado tiene un efecto "
-            f"positivo significativo, y los pesos calibrados son casi los a priori; no deben leerse como evidencia "
-            f"de poder predictivo.",
+            f"**La Confiabilidad NO es una probabilidad ni ha mostrado poder predictivo sólido.** En la calibración "
+            f"propia ({_c('n_calibracion')} órdenes ejecutadas) la correlación de Spearman entre el score y el retorno "
+            f"a 60 ruedas fue {_c('spearman_ret60')} (débil y con t inflado por el solapamiento de órdenes), pero "
+            f"con el bounce fue {_c('spearman_bounce')}: el bounce y la MAE a 60 ruedas empeoran al subir el score. "
+            f"El tercio de score más alto tuvo un bounce de {_c('tercil_alto_bounce')} y el más bajo de "
+            f"{_c('tercil_bajo_bounce')}; el retorno medio a 60 ruedas fue {_c('tercil_alto_ret60')} contra "
+            f"{_c('tercil_bajo_ret60')}. El score no discrimina resultados en conjunto y su relación con el retorno "
+            f"es débil y no robusta; los pesos calibrados no deben leerse como evidencia de poder predictivo.",
+            f"**Límite abierto de la absorción (posible look-ahead):** el peso de la absorción "
+            f"({_pct(pesos.get('absorcion', 0.0))}) sale de una calibración en la que la señal se mide en las 5 velas "
+            f"posteriores al llenado, es decir *después* de entrar; no es una señal disponible al colocar la orden y "
+            f"podría contener look-ahead. Comprobación del auditor midiendo desde el cierre de la 6.ª rueda: retorno "
+            f"medio con absorción {_c('abs_ret_con')} contra {_c('abs_ret_sin')} sin ella (t≈1,9, p≈{_c('abs_p')}): "
+            f"sugerente, no concluyente. La fórmula no se cambió.",
+            f"**Confluencia rara:** solo {_c('fam3_ahora')} de las órdenes tienen 3 o más familias (antes "
+            f"{_c('fam3_antes')}), así que el score de confluencia rara vez es alto y el reparto por familias y el "
+            f"ranking cambiaron de escala.",
             f"**Retornos:** comprar en el rango mejora la *media* frente a comprar sin criterio (+{_c('media_pp60')[1:]} "
             f"puntos a 60 ruedas y +{_c('media_pp252')[1:]} a 252), pero la **mediana a 252 ruedas es casi idéntica a la "
             f"línea base** ({_c('mediana252_fill')} contra {_c('mediana252_base')}) y la **MAE es sistemáticamente "
@@ -1427,6 +1475,7 @@ class Vista:
         self.tabla = ui.table(columns=[
             dict(name="nivel", label="Nivel", field="nivel", sortable=True, align="left"),
             dict(name="rango", label="Rango inf - sup", field="r_inf", sortable=True, align="left"),
+            dict(name="ancho_pct", label="Ancho %", field="ancho_pct", sortable=True),
             dict(name="dist_pct", label=f"{ETIQUETA_DIST_RSUP} %".capitalize(), field="dist_pct", sortable=True),
             dict(name="familias", label="Familias", field="familias", sortable=True, align="left"),
             dict(name="bounce", label="Bounce", field="bounce", sortable=True),
@@ -1442,6 +1491,9 @@ class Vista:
             "Distancia % de r_sup (precio del límite GTC) al precio actual; negativo = por debajo."))
         self.tabla.add_slot("body-cell-rango", "<q-td :props=\"props\">${{ props.row.r_inf.toFixed(2) }} - "
                                                "${{ props.row.r_sup.toFixed(2) }}</q-td>")
+        self.tabla.add_slot("header-cell-ancho_pct", _cabecera_con_ayuda(
+            "Ancho de la zona (r_sup - r_inf) en % del precio actual. Tope del modelo: 5 % del precio."))
+        self.tabla.add_slot("body-cell-ancho_pct", _slot("props.value.toFixed(1) + '%'"))
         self.tabla.add_slot("body-cell-dist_pct", _slot("((props.value > 0 ? '+' : '') + props.value.toFixed(1) + '%')"))
         for col in ("bounce", "fill_rate", "mae"):
             self.tabla.add_slot(f"body-cell-{col}", _slot("props.value.toFixed(1) + '%'"))
