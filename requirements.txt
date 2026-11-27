@@ -6,3 +6,5 @@ matplotlib
 edgartools
 smartmoneyconcepts
 pytest
+nicegui
+plotly
