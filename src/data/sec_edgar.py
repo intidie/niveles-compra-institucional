@@ -35,9 +35,10 @@ UMBRAL_FALLO_FORM4 = 0.5
 
 
 def configurar_identidad(identidad=None):
-    """SEC exige User-Agent con contacto. Usa SEC_EDGAR_IDENTITY o el valor dado."""
+    """SEC exige User-Agent con contacto. Usa el valor dado, EDGAR_IDENTITY o SEC_EDGAR_IDENTITY."""
     global _identidad_ok
-    ident = identidad or os.environ.get("SEC_EDGAR_IDENTITY") or "NivelesScreener contacto@example.com"
+    ident = (identidad or os.environ.get("EDGAR_IDENTITY") or os.environ.get("SEC_EDGAR_IDENTITY")
+             or "NivelesScreener contacto@example.com")
     set_identity(ident)
     _identidad_ok = True
 

@@ -10,3 +10,5 @@ congress-trading-monitor/
 _cache/
 *.pkl
 resultados/
+build/
+dist/

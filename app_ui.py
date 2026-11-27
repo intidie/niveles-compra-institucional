@@ -33,17 +33,23 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import inspect
 import json
 import math
 import os
 import re
 import sys
+from collections import OrderedDict
 from concurrent.futures.process import BrokenProcessPool
 from pickle import PicklingError
 from string import Template
 from typing import Any, Iterable
 
+if sys.stdout is None or sys.stderr is None:  # exe congelado sin consola (console=False): print/uvicorn fallarian
+    _nul = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout = sys.stdout or _nul
+    sys.stderr = sys.stderr or _nul
 os.environ.setdefault("MPLBACKEND", "Agg")  # charts.py importa pyplot; el servidor no necesita ventana
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,13 +57,17 @@ import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 from plotly.subplots import make_subplots  # noqa: E402
 
+from nicegui import app  # noqa: E402  (importar no abre el servidor; solo registra /health)
+
 import main as nucleo  # noqa: E402  (analizar_ticker, leer_watchlist, ordenar_ranking, asignar_capital)
 from src.reporting.charts import (ETIQUETA_DIST_RSUP, dist_a_r_sup_pct, marcadores_form4,  # noqa: E402
                                   perfil_histograma, trimestres_acumulacion)
+from src.reporting import userdata  # noqa: E402
 
-RAIZ = os.path.dirname(os.path.abspath(__file__))
-RUTA_WATCHLIST = os.path.join(RAIZ, "watchlist.csv")
-RUTA_METODOLOGIA = os.path.join(RAIZ, "docs", "METODOLOGIA.md")
+RAIZ = userdata.raiz_recursos()  # raiz del repo o sys._MEIPASS si esta congelado (PyInstaller)
+RUTA_WATCHLIST = userdata.recurso("watchlist.csv")  # lista de EJEMPLO, solo lectura
+RUTA_METODOLOGIA = userdata.recurso("docs", "METODOLOGIA.md")
+MAX_CACHE_NUBE = 3  # tickers con resultado completo (df incluido) retenidos en la nube (512 MB)
 TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 TOLERANCIA_VALORACION = (0.98, 1.02)  # igual que main.analizar_ticker (anclas de valoracion en zona)
 
@@ -544,13 +554,22 @@ def validar_capital(v: Any) -> bool:
     return f is not None and f > 0
 
 
+@app.get("/health")
+def health() -> dict:
+    """Health check (Render/UptimeRobot): no construye interfaz ni carga modulos pesados."""
+    return {"status": "ok"}
+
+
 async def calcular_ticker(ticker: str, capital: float, backtest: bool = True, sec: bool = True) -> dict:
     """Corre ``main.analizar_ticker`` fuera del hilo de eventos (proceso aparte; hilo si el pool no existe).
 
-    El backtest es Python puro con GIL, por eso se prefiere ``run.cpu_bound``.
+    El backtest es Python puro con GIL, por eso en local se prefiere ``run.cpu_bound``. En la nube (512 MB) un pool de
+    procesos duplicaria la memoria: se usa un solo hilo (``asyncio.to_thread``).
     """
-    from nicegui import run
     kw = dict(backtest=backtest, sec=sec, verbose=False)
+    if userdata.en_nube():
+        return await asyncio.to_thread(nucleo.analizar_ticker, ticker, capital, **kw)
+    from nicegui import run
     try:
         return await run.cpu_bound(nucleo.analizar_ticker, ticker, capital, **kw)
     except (RuntimeError, BrokenProcessPool, PicklingError, OSError):
@@ -558,11 +577,35 @@ async def calcular_ticker(ticker: str, capital: float, backtest: bool = True, se
 
 
 def cargar_watchlist(ruta: str = RUTA_WATCHLIST) -> list[str]:
-    """Tickers de watchlist.csv ([] si falta o esta vacio)."""
+    """Tickers de la lista de EJEMPLO watchlist.csv ([] si falta o esta vacio)."""
     try:
         return nucleo.leer_watchlist(ruta)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return []
+
+
+def cargar_watchlist_usuario(directorio: str | None = None) -> list[str]:
+    """Tickers de la watchlist personalizada del usuario ([] si aun no existe)."""
+    return userdata.tickers(userdata.leer(directorio))
+
+
+def resumen_liviano(r: dict) -> dict:
+    """Resultado sin los objetos pesados (df, form4, r13f): lo unico que necesita el ranking."""
+    return {k: v for k, v in r.items() if k not in ("df", "form4", "r13f")}
+
+
+class CacheLRU(OrderedDict):
+    """dict con tope opcional (LRU): ``maximo=None`` = sin limite (local)."""
+
+    def __init__(self, maximo: int | None = None) -> None:
+        super().__init__()
+        self.maximo = maximo
+
+    def __setitem__(self, k, v) -> None:
+        super().__setitem__(k, v)
+        self.move_to_end(k)
+        while self.maximo is not None and len(self) > self.maximo:
+            self.popitem(last=False)
 
 
 # --- Pestana "Modelo": contenido explicativo como DATOS (testeable sin red ni NiceGUI) ---------------------------
@@ -999,7 +1042,7 @@ def contenido_modelo() -> list[dict]:
     # 4 ---------------------------------------------------------------------------------------------------
     secciones.append({"id": "panel", "titulo": "5. El panel lateral explicado", "icono": "tune",
                       "abierta": False, "parrafos": [
-        f"**Ticker:** el símbolo de la acción (por ejemplo NVDA o BRK-B). El menú sugiere los de tu watchlist.csv y "
+        f"**Ticker:** el símbolo de la acción (por ejemplo NVDA o BRK-B). El menú sugiere los de tu watchlist personalizada y "
         f"también puedes escribir otro.",
         f"**Capital USD:** el dinero que quieres repartir **por ticker**. Solo reciben capital las {p['max_tramos']} "
         f"mejores zonas, repartido en proporción a su número de familias, y cada tramo se compra con una orden límite "
@@ -1176,6 +1219,18 @@ def contenido_modelo() -> list[dict]:
                f"`python -m src.validation.scoring`.")
     secciones.append({"id": "limitaciones", "titulo": "8. Limitaciones honestas", "icono": "report_problem",
                       "abierta": True, "parrafos": lim})
+    secciones.append({"id": "watchlist", "titulo": "9. Tu watchlist: qué es y qué calcula el escaneo", "icono": "star",
+                      "abierta": False, "parrafos": [
+        "**Qué es:** la lista de acciones que sigues. Se arma con el botón de estrella de la pestaña Análisis o "
+        "escribiendo tickers en la pestaña Watchlist (también puedes cargar la lista de ejemplo y quitar lo que no te "
+        "interese).",
+        "**Qué calcula el escaneo:** el botón Escanear corre el análisis completo SOLO de los tickers de tu lista "
+        "(los marcados) y los ordena por Score de ranking. No calcula ningún otro activo. El backtest es opcional "
+        "porque lo hace mucho más lento (y en la nube viene desactivado).",
+        "**Capital:** el capital del panel lateral es POR TICKER; no se reparte entre los activos de la lista.",
+        "**Dónde se guarda:** en un archivo de tu equipo (carpeta de datos de la aplicación), no en el repositorio. En "
+        "un servidor en la nube (por ejemplo Render, plan gratuito) el disco es efímero: la lista personalizada no "
+        "persiste entre reinicios."]})
     return secciones
 
 
@@ -1244,13 +1299,21 @@ def renderizar_modelo(secciones: list[dict]) -> None:
 
 
 # --- Capa de widgets (NiceGUI) -----------------------------------------------------------------------------
-CACHE: dict[str, dict] = {}  # ticker -> ultimo resultado de analizar_ticker (compartido entre pestanas)
+# ticker -> ultimo resultado de analizar_ticker (compartido entre pestanas); LRU de 3 en la nube (memoria)
+CACHE: CacheLRU = CacheLRU(MAX_CACHE_NUBE if userdata.en_nube() else None)
 
 _PLANTILLA_NUM = ("<q-td :props=\"props\">{{ props.value == null ? 'n/d' : %s }}</q-td>")
 
 
 def _slot(expr: str) -> str:
     return _PLANTILLA_NUM % expr
+
+
+TEXTO_WATCHLIST_INTRO = (
+    "Tu watchlist es la lista de acciones que sigues. Añade las que te interesan (aquí o con la estrella en Análisis).",
+    "El botón Escanear calcula SOLO las de tu lista (las marcadas) y las ordena por puntaje; no toca ninguna otra.",
+    "Cada ticker recibe el capital completo del panel lateral. La lista se guarda en tu equipo (en la nube no persiste).",
+)
 
 
 def _cabecera_con_ayuda(texto: str) -> str:
@@ -1269,7 +1332,9 @@ class Vista:
     def __init__(self) -> None:
         from nicegui import ui
         self.ui = ui
-        self.watchlist = cargar_watchlist()
+        self.items = userdata.leer()  # watchlist personalizada [{ticker, nota}]; el CSV del repo es solo un ejemplo
+        self.watchlist = userdata.tickers(self.items)
+        self.sel_wl: dict[str, bool] = {}  # casillas de la pestana Watchlist (solo se escanean las marcadas)
         # El select arranca mostrando el primer ticker de la watchlist: el estado interno debe coincidir con lo que
         # se ve (si no, la pagina muestra "NVDA" pero analiza/refresca "nada" hasta el primer cambio manual).
         self.ticker: str | None = validar_ticker(self.watchlist[0]) if self.watchlist else None
@@ -1336,6 +1401,11 @@ class Vista:
 
     def _panel_analisis(self) -> None:
         ui = self.ui
+        with ui.row().classes("w-full items-center gap-2"):
+            self.btn_wl = ui.button("Agregar a mi watchlist", icon="star_border", on_click=self.alternar_watchlist) \
+                .props("outline color=amber data-accion=watchlist-toggle")
+            self.btn_wl.tooltip("Guarda este ticker en tu lista personalizada (pestaña Watchlist); en la nube no persiste.")
+            self._actualizar_btn_wl()
         with ui.row().classes("w-full gap-3 items-stretch no-wrap overflow-auto"):
             self.tarj = {}
             for clave, titulo in (("precio", "Precio actual"), ("confluencia", "Confluencia"),
@@ -1381,11 +1451,28 @@ class Vista:
 
     def _panel_watchlist(self) -> None:
         ui = self.ui
+        with ui.element("div").classes("aviso-box w-full").props("data-nota=watchlist-intro"):
+            for linea in TEXTO_WATCHLIST_INTRO:
+                ui.label(linea).classes("text-caption")
+        with ui.row().classes("w-full items-center gap-2 no-wrap"):
+            self.in_wl_ticker = ui.input("Añadir ticker", placeholder="NVDA").props("dense outlined dark") \
+                .classes("w-40").on("keydown.enter", lambda _e: self.anadir_manual())
+            self.in_wl_nota = ui.input("Nota (opcional)").props("dense outlined dark").classes("grow") \
+                .on("keydown.enter", lambda _e: self.anadir_manual())
+            self.btn_wl_add = ui.button("Añadir", icon="add", on_click=self.anadir_manual)
+        with ui.row().classes("w-full items-center gap-2"):
+            self.btn_wl_ejemplo = ui.button("Cargar lista de ejemplo", icon="playlist_add",
+                                            on_click=self.cargar_ejemplo).props("flat")
+            self.btn_wl_vaciar = ui.button("Vaciar", icon="delete_sweep", on_click=self.vaciar_lista) \
+                .props("flat color=negative")
+        self.cont_wl = ui.column().classes("w-full gap-0").props("data-lista=watchlist")
+        self._pintar_lista()
         with ui.row().classes("items-center gap-4"):
-            self.btn_scan = ui.button("Escanear watchlist.csv", icon="radar", on_click=self.escanear)
+            self.btn_scan = ui.button("Escanear mi watchlist", icon="radar", on_click=self.escanear)
             self.btn_stop = ui.button("Detener", icon="stop", on_click=self._detener_scan).props("flat")
             self.btn_stop.visible = False
-            self.sw_bt_wl = ui.switch("Incluir backtest (lento)", value=False)
+            self.sw_bt_wl = ui.switch("Incluir backtest (lento)", value=not userdata.en_nube())
+        self._actualizar_btn_scan()
         # Notas visibles (no solo tooltips): el capital NO se reparte entre tickers y el score es solo orden.
         with ui.element("div").classes("aviso-box w-full").props("data-nota=watchlist"):
             self.nota_capital = ui.label(nucleo.NOTA_CAPITAL_BATCH).classes("text-caption")
@@ -1404,7 +1491,7 @@ class Vista:
             dict(name="mejor_zona", label="Mejor zona", field="mejor_zona", align="left"),
             dict(name="dist_pct", label=f"{ETIQUETA_DIST_RSUP} %".capitalize(), field="dist_pct", sortable=True)],
             rows=[], row_key="id", pagination=0).props("dense flat bordered dark no-data-label=\"Pulsa Escanear "
-                                                       "watchlist.csv\"").classes("w-full cursor-pointer")
+                                                       "tu watchlist\"").classes("w-full cursor-pointer")
         self.tabla_wl.add_slot("body-cell-precio", _slot("'$' + props.value.toFixed(2)"))
         for col in ("score", "confluencia", "confiabilidad"):
             self.tabla_wl.add_slot(f"body-cell-{col}", _slot("props.value.toFixed(1)"))
@@ -1417,6 +1504,111 @@ class Vista:
             "Distancia % de r_sup (precio del límite GTC) de la mejor zona al precio actual."))
         self.tabla_wl.on("rowClick", self._click_ranking)
         self.ui.label("Click en una fila para cargar el ticker en la vista Analisis.").classes("text-caption txt-muted")
+
+    # ---- watchlist personalizada
+    def _guardar_lista(self, items: list[dict]) -> bool:
+        """Persiste (atomico) y repinta todo lo que depende de la lista. False si no se pudo escribir."""
+        items = userdata.normalizar(items)
+        try:
+            userdata.guardar(items)
+        except OSError as e:
+            self.ui.notify(f"No se pudo guardar tu watchlist: {e}", type="negative", multi_line=True)
+            return False
+        self.items = items
+        self.watchlist = userdata.tickers(items)
+        self.sel_wl = {t: self.sel_wl.get(t, True) for t in self.watchlist}
+        if hasattr(self, "sel_ticker"):
+            opciones = self.watchlist + ([self.ticker] if self.ticker and self.ticker not in self.watchlist else [])
+            self.sel_ticker.set_options(opciones)
+        if hasattr(self, "cont_wl"):
+            self._pintar_lista()
+            self._actualizar_btn_scan()
+        if hasattr(self, "btn_wl"):
+            self._actualizar_btn_wl()
+        return True
+
+    def _pintar_lista(self) -> None:
+        ui = self.ui
+        self.sel_wl = {t: self.sel_wl.get(t, True) for t in self.watchlist}
+        self.cont_wl.clear()
+        with self.cont_wl:
+            if not self.items:
+                ui.label("Tu watchlist está vacía. Añade un ticker, usa el botón de estrella en Análisis o carga la "
+                         "lista de ejemplo.").classes("txt-muted text-caption")
+            for it in self.items:
+                t = it["ticker"]
+                with ui.row().classes("w-full items-center no-wrap gap-1").props(f"data-ticker={t}"):
+                    ui.checkbox(t, value=self.sel_wl.get(t, True),
+                                on_change=lambda e, k=t: self._marcar(k, e.value)).props("dense")
+                    ui.label(it["nota"]).classes("grow txt-muted text-caption")
+                    ui.button(icon="close", on_click=lambda _e, k=t: self.quitar_ticker(k)).props(
+                        f"flat dense round size=sm aria-label=Quitar-{t}")
+
+    def _marcar(self, t: str, valor: bool) -> None:
+        self.sel_wl[t] = bool(valor)
+        self._actualizar_btn_scan()
+
+    def _seleccionados(self) -> list[str]:
+        return [t for t in self.watchlist if self.sel_wl.get(t, True)]
+
+    def _actualizar_btn_scan(self) -> None:
+        if not hasattr(self, "btn_scan"):
+            return
+        n, total = len(self._seleccionados()), len(self.watchlist)
+        self.btn_scan.text = ("Escanear mi watchlist" if n == total else "Escanear seleccionados") + f" ({n})"
+
+    def _actualizar_btn_wl(self) -> None:
+        t = self.ticker
+        esta = bool(t) and t in self.watchlist
+        self.btn_wl.text = ("Agregar a mi watchlist" if not t else
+                            f"Quitar {t} de mi watchlist" if esta else f"Agregar {t} a mi watchlist")
+        self.btn_wl.props(f"icon={'star' if esta else 'star_border'}")
+        self.btn_wl.set_enabled(bool(t))
+
+    def alternar_watchlist(self) -> None:
+        t = validar_ticker(self.ticker)
+        if t is None:
+            self.ui.notify("Elige un ticker válido primero (p. ej. NVDA o BRK-B)", type="warning")
+            return
+        if t in self.watchlist:
+            nueva, _ = userdata.quitar(self.items, t)
+            if self._guardar_lista(nueva):
+                self.ui.notify(f"{t} quitado de tu watchlist", type="info")
+        else:
+            nueva, ok = userdata.anadir(self.items, t)
+            if ok and self._guardar_lista(nueva):
+                self.ui.notify(f"{t} agregado a tu watchlist", type="positive")
+
+    def anadir_manual(self) -> None:
+        t = validar_ticker(self.in_wl_ticker.value)
+        if t is None:
+            self.ui.notify("Ticker inválido (letras/números, p. ej. NVDA o BRK-B)", type="warning")
+            return
+        nueva, ok = userdata.anadir(self.items, t, self.in_wl_nota.value)
+        if not ok:
+            self.ui.notify(f"{t} ya está en tu watchlist", type="info")
+        elif self._guardar_lista(nueva):
+            self.in_wl_ticker.value = ""
+            self.in_wl_nota.value = ""
+            self.ui.notify(f"{t} agregado a tu watchlist", type="positive")
+
+    def quitar_ticker(self, t: str) -> None:
+        nueva, ok = userdata.quitar(self.items, t)
+        if ok and self._guardar_lista(nueva):
+            self.ui.notify(f"{t} quitado de tu watchlist", type="info")
+
+    def cargar_ejemplo(self) -> None:
+        ejemplo = userdata.leer_csv(RUTA_WATCHLIST)
+        if not ejemplo:
+            self.ui.notify("No se encontró la lista de ejemplo (watchlist.csv)", type="warning")
+            return
+        nueva, n = userdata.fusionar(self.items, ejemplo)
+        if self._guardar_lista(nueva):
+            self.ui.notify(f"Lista de ejemplo cargada: {n} ticker(s) nuevo(s)", type="positive" if n else "info")
+
+    def vaciar_lista(self) -> None:
+        if self._guardar_lista([]):
+            self.ui.notify("Watchlist vaciada", type="info")
 
     # ---- eventos
     def _ticker_cambiado(self, valor: str | None) -> None:
@@ -1498,9 +1690,10 @@ class Vista:
         ui = self.ui
         if self.ocupado:
             return
-        tickers = cargar_watchlist()
+        tickers = self._seleccionados()
         if not tickers:
-            ui.notify("watchlist.csv no existe o esta vacia", type="warning")
+            ui.notify("Tu watchlist está vacía o sin tickers marcados: añade alguno o carga la lista de ejemplo.",
+                      type="warning")
             return
         cap = self._capital() or 1000.0
         self.detener = False
@@ -1519,8 +1712,10 @@ class Vista:
                 except Exception as e:  # noqa: BLE001  (un fallo individual no aborta el escaneo)
                     r = {"ticker": t, "precio_actual": None, "zonas": [], "errores": [f"{type(e).__name__}: {e}"]}
                 if r.get("precio_actual") is not None:
-                    CACHE[t] = r
-                resultados.append(r)
+                    CACHE[t] = r  # LRU en la nube: solo los ultimos 3 conservan el df completo
+                resultados.append(resumen_liviano(r))  # el ranking solo necesita el resumen, no df/form4/r13f
+                del r
+                gc.collect()  # secuencial + liberar memoria tras cada ticker (512 MB en la nube)
                 self.prog.value = i / len(tickers)
         finally:
             self._ocupar(False)
@@ -1539,6 +1734,7 @@ class Vista:
     def refrescar(self, solo_figura: bool = False) -> None:
         if not hasattr(self, "tabla"):
             return
+        self._actualizar_btn_wl()
         res = CACHE.get(self.ticker or "")
         capital = self._capital() or 1000.0
         if res is None:
@@ -1606,7 +1802,42 @@ def pagina() -> None:
     Vista().construir()
 
 
-if __name__ in {"__main__", "__mp_main__"}:
+def config_ejecucion(env: dict | None = None, pywebview_ok: bool | None = None) -> dict:
+    """Argumentos de ``ui.run`` segun el entorno (funcion pura, testeable).
+
+    Nube (variable PORT): servidor 0.0.0.0, sin ventana nativa. Local: 127.0.0.1 y ventana nativa (pywebview) si esta
+    disponible; si no, cae al navegador. ``APP_UI_NATIVE=0`` fuerza navegador; ``APP_UI_SHOW=0`` no lo abre.
+    """
+    env = os.environ if env is None else env
+    nube = "PORT" in env
+    nativo = not nube and env.get("APP_UI_NATIVE", "1") != "0"
+    if nativo:
+        if pywebview_ok is None:
+            try:
+                import webview  # noqa: F401
+                pywebview_ok = True
+            except Exception:  # noqa: BLE001  (ImportError o fallo del backend GUI)
+                pywebview_ok = False
+        if not pywebview_ok:
+            print("[aviso] pywebview no esta disponible: se abre en el navegador (pip install pywebview para la "
+                  "ventana nativa).")
+            nativo = False
+    cfg = dict(host="0.0.0.0" if nube else "127.0.0.1", port=int(env.get("PORT") or env.get("APP_UI_PORT") or 8080),
+               native=nativo, reload=False,
+               title="Niveles de Compra Institucional", dark=True)
+    if nativo:
+        cfg["window_size"] = (1440, 900)  # ojo: en ui.run, window_size ya activa native; solo se pasa si es nativo
+    else:
+        cfg["show"] = not nube and env.get("APP_UI_SHOW", "1") != "0"
+    return cfg
+
+
+def ejecutar() -> None:
     from nicegui import ui
-    ui.run(pagina, title="Niveles de compra institucionales", dark=True, reload=False,
-           port=int(os.environ.get("APP_UI_PORT", "8080")), show=os.environ.get("APP_UI_SHOW", "1") != "0")
+    ui.run(pagina, **config_ejecucion())
+
+
+if __name__ in {"__main__", "__mp_main__"}:
+    import multiprocessing
+    multiprocessing.freeze_support()  # NiceGUI nativo usa multiprocessing; imprescindible en el .exe de PyInstaller
+    ejecutar()

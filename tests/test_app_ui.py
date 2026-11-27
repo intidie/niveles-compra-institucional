@@ -433,6 +433,11 @@ def cliente():
         yield c
 
 
+def _guardar_usuario(tickers):
+    from src.reporting import userdata
+    userdata.guardar(tickers)
+
+
 def test_vista_construye_tabs_ayudas_y_tema_oscuro(cliente):
     from nicegui import ui
     v = ui_mod.Vista()
@@ -448,7 +453,7 @@ def test_vista_construye_tabs_ayudas_y_tema_oscuro(cliente):
     assert col.props["dark-page"] == ui_mod.BG_PAGINA and col.props["primary"] == ui_mod.COLORES_QUASAR["primary"]
     assert "color-scheme" in cliente._head_html and ui_mod.BG_POPUP in cliente._head_html
     assert not [e for e in els if isinstance(e, ui.table) and "dark" not in e.props]
-    assert len([e for e in els if isinstance(e, ui.expansion)]) == 8  # pestaña Modelo
+    assert len([e for e in els if isinstance(e, ui.expansion)]) == 9  # pestaña Modelo
 
 
 def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch):
@@ -470,7 +475,7 @@ def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch)
 # =====================================================================================================
 # Pestaña "Modelo": contenido como datos (sin red), fidelidad con el codigo y con docs/METODOLOGIA.md
 # =====================================================================================================
-SECCIONES = ["que_es", "logica", "familias", "grafico", "panel", "metricas", "confiabilidad", "limitaciones"]
+SECCIONES = ["que_es", "logica", "familias", "grafico", "panel", "metricas", "confiabilidad", "limitaciones", "watchlist"]
 
 
 def _sec(secciones, id_):
@@ -542,7 +547,7 @@ def test_modelo_aviso_no_es_asesoria_visible_en_la_capa_de_render(cliente):
     els = list(cliente.elements.values())
     exp = [e for e in els if isinstance(e, ui.expansion)]
     assert [e.props["data-seccion"] for e in exp] == SECCIONES
-    assert [e.props["model-value"] for e in exp] == [True, True, False, False, False, False, False, True]
+    assert [e.props["model-value"] for e in exp] == [True, True, False, False, False, False, False, True, False]
     md = " ".join(str(getattr(e, "content", "")) for e in els if isinstance(e, ui.markdown))
     assert "No es asesoría financiera" in md and md.count("No es asesoría financiera") >= 2  # arriba y en Limitaciones
     assert any(isinstance(e, ui.card) and "aviso-card" in e._classes for e in els)  # cuadro de aviso fuera de las expansiones
@@ -825,7 +830,7 @@ def test_vista_ticker_inicial_coincide_con_el_select(cliente):
 
 
 def test_vista_muestra_el_resultado_cacheado_del_ticker_inicial(cliente, df_sintetico, monkeypatch):
-    monkeypatch.setattr(ui_mod, "cargar_watchlist", lambda *a, **k: ["TEST", "AAA"])
+    _guardar_usuario(["TEST", "AAA"])
     monkeypatch.setitem(ui_mod.CACHE, "TEST", _res_con_avisos(df_sintetico))
     v = ui_mod.Vista()
     v.construir()  # sin tocar el select: antes self.ticker era None y la pagina mostraba "n/d" con TEST seleccionado
@@ -833,12 +838,12 @@ def test_vista_muestra_el_resultado_cacheado_del_ticker_inicial(cliente, df_sint
 
 
 def test_vista_sin_cache_invita_a_recalcular_el_ticker_mostrado(cliente, monkeypatch):
-    monkeypatch.setattr(ui_mod, "cargar_watchlist", lambda *a, **k: ["ZZZ"])
+    _guardar_usuario(["ZZZ"])
     monkeypatch.delitem(ui_mod.CACHE, "ZZZ", raising=False)
     v = ui_mod.Vista()
     v.construir()
     assert any("ZZZ" in t and "Recalcular" in t for t in _textos_avisos(v))
-    monkeypatch.setattr(ui_mod, "cargar_watchlist", lambda *a, **k: [])
+    _guardar_usuario([])
     v2 = ui_mod.Vista()
     v2.construir()
     assert v2.ticker is None and v2.sel_ticker.value is None

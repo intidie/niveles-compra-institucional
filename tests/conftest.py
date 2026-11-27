@@ -27,3 +27,9 @@ def zonas():
     return [{"nivel": 1, "r_inf": 90.0, "r_sup": 95.0, "n_familias": 3, "familias": ["volumen", "avwap", "ob"],
              "fuente": "POC+AVWAP+OB"},
             {"nivel": 2, "r_inf": 80.0, "r_sup": 84.0, "n_familias": 2, "familias": ["swing", "logreg"]}]
+
+
+@pytest.fixture(autouse=True)
+def _datos_usuario_aislados(tmp_path, monkeypatch):
+    """Nunca tocar el directorio de datos real del usuario (watchlist personalizada) durante los tests."""
+    monkeypatch.setenv("NIVELES_DATA_DIR", str(tmp_path / "datos_usuario"))
