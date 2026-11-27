@@ -288,9 +288,28 @@ def nombres_componentes(claves) -> str:
     return ", ".join(NOMBRES_COMPONENTES.get(k, k) for k in claves)
 
 
+def _info_mercado(ticker: str, tk_obj, obtener_info) -> dict:
+    """``info`` de yfinance. Local: con cache de 6 h en disco (menos peticiones); nube: directo, sin disco."""
+    try:
+        from src.reporting import userdata
+        if not userdata.en_nube():
+            from src.levels.fair_value import obtener_info_mercado
+            info = obtener_info_mercado(ticker, tk_obj, fetch=lambda _t: obtener_info(tk_obj))
+            if info:
+                return info
+    except Exception:  # noqa: BLE001  (el cache es opcional)
+        pass
+    return obtener_info(tk_obj)
+
+
 def analizar_ticker(ticker: str, capital: float, periodo: str = "10y", anios_backtest: int = 5,
-                    backtest: bool = True, sec: bool = True, verbose: bool = True, valor_justo: bool = True) -> dict:
+                    backtest: bool = True, sec: bool = True, verbose: bool = True, valor_justo: bool = True,
+                    modo: str | None = None) -> dict:
     """Pipeline completo de un ticker. Nunca lanza: los fallos de cada etapa quedan en ``errores``.
+
+    ``periodo``: historial de yfinance (10y por defecto; la UI en la nube pasa "3y"). ``modo`` ("local" | "nube" | None)
+    fuerza el modo del valor justo (None = se decide por la variable PORT dentro de ``fair_value``). En local el ``info``
+    de yfinance se cachea 6 h en disco (``fair_value.obtener_info_mercado``); en la nube no.
 
     ``valor_justo`` guarda en ``res["entradas_valoracion"]`` (dict liviano, sin DataFrames) los insumos de la bateria
     de modelos de ``src/levels/fair_value.py``; la UI recalcula el valor justo con ellos sin red. Es aditivo: no
@@ -323,7 +342,7 @@ def analizar_ticker(ticker: str, capital: float, periodo: str = "10y", anios_bac
         return res
     res["df"] = df
     res["precio_actual"] = float(df["Close"].iloc[-1])
-    info = obtener_info(tk_obj)
+    info = _info_mercado(ticker, tk_obj, obtener_info)
     try:
         res["earnings"] = verificar_proximidad_earnings(tk_obj)
     except Exception as e:  # noqa: BLE001
@@ -367,7 +386,8 @@ def analizar_ticker(ticker: str, capital: float, periodo: str = "10y", anios_bac
     if valor_justo:
         try:
             from src.levels.fair_value import extraer_entradas
-            res["entradas_valoracion"] = extraer_entradas(ticker, tk_obj, df, info).to_dict()
+            kw_vj = {"modo": modo} if modo else {}     # sin ``modo`` el motor decide solo (PORT => nube)
+            res["entradas_valoracion"] = extraer_entradas(ticker, tk_obj, df, info, **kw_vj).to_dict()
         except Exception as e:  # noqa: BLE001
             err("valor_justo", e)
 

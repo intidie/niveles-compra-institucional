@@ -78,7 +78,7 @@ def test_calcular_ticker_en_nube_usa_hilo_y_nunca_run_cpu_bound(monkeypatch):
     monkeypatch.setattr(ui_mod.nucleo, "analizar_ticker",
                         lambda t, c, **kw: llamadas.append((t, c, kw)) or {"ticker": t, "precio_actual": 1.0})
     r = asyncio.run(ui_mod.calcular_ticker("AAA", 500.0, backtest=False, sec=True))
-    assert r["ticker"] == "AAA" and llamadas == [("AAA", 500.0, {"backtest": False, "sec": True, "verbose": False})]
+    assert r["ticker"] == "AAA" and llamadas == [("AAA", 500.0, {"periodo": "3y", "backtest": False, "sec": True, "verbose": False})]   # nube: 3 anios
 
 
 def test_cache_lru_limita_y_resumen_liviano_quita_pesados():

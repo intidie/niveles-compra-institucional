@@ -10,7 +10,7 @@ Las escrituras del usuario (watchlist personalizada) van a %APPDATA%\\NivelesIns
 """
 import os
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 RAIZ = os.path.abspath(SPECPATH)  # noqa: F821  (SPECPATH lo inyecta PyInstaller)
 
@@ -19,15 +19,20 @@ datas = [
     (os.path.join(RAIZ, "docs", "METODOLOGIA.md"), "docs"),
     (os.path.join(RAIZ, "docs", "GUIA_POST_RESULTADOS.md"), "docs"),
     (os.path.join(RAIZ, "src", "validation", "pesos_calibrados.json"), os.path.join("src", "validation")),
+    # TradingView Lightweight Charts (standalone, Apache-2.0) + grafico_analisis.js: se sirven en local (sin CDN) desde
+    # <raiz de recursos>/static con app.add_static_files (app_ui.DIR_STATIC = userdata.recurso("static")).
+    (os.path.join(RAIZ, "static"), "static"),
 ]
+assert os.path.isfile(os.path.join(RAIZ, "static", "vendor", "lightweight-charts.standalone.production.js")),     "falta static/vendor/lightweight-charts.standalone.production.js"
+assert os.path.isfile(os.path.join(RAIZ, "static", "charts", "grafico_analisis.js")), "falta static/charts/grafico_analisis.js"
 binaries = []
 hiddenimports = ["main", "app_ui", "multiprocessing", "uvicorn.logging", "uvicorn.loops.auto",
                  "uvicorn.protocols.http.auto", "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"]
 # src/ se importa de forma lazy (p. ej. validacion/backtest dentro de main.analizar_ticker): todos sus modulos.
 hiddenimports += collect_submodules("src")
 
-# Paquetes con datos/modulos que el analisis estatico no ve (iconos y JS de nicegui, plantillas de plotly, JS de
-# pywebview, referencias de edgartools, certificados y libs nativas de curl_cffi).
+# Paquetes con datos/modulos que el analisis estatico no ve (iconos y JS de nicegui -incluido Apache ECharts, que usa la
+# pestana Valor Justo y se sirve sin CDN-, JS de pywebview, referencias de edgartools, certificados y libs nativas de curl_cffi).
 for paquete in ("nicegui", "edgar", "smartmoneyconcepts", "webview", "yfinance", "curl_cffi", "certifi"):
     try:
         d, b, h = collect_all(paquete)
@@ -36,8 +41,6 @@ for paquete in ("nicegui", "edgar", "smartmoneyconcepts", "webview", "yfinance",
     datas += d
     binaries += b
     hiddenimports += h
-datas += collect_data_files("plotly")  # plotly.min.js y templates (package_data)
-hiddenimports += collect_submodules("plotly.graph_objs") + collect_submodules("plotly.validators")
 
 a = Analysis(
     [os.path.join(RAIZ, "app_ui.py")],

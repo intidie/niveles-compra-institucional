@@ -1,70 +1,61 @@
-"""Valor justo por bateria de 15 modelos (DCF, multiplos, dividendos, valor), estilo InvestingPro.
+"""Valor justo por bateria de 15 modelos (DCF, multiplos, dividendos, valor) en dos ESCENARIOS: Medio y Pesimista.
 
 AVISO HONESTO: la metodologia de InvestingPro es propietaria. Esto es una implementacion PROPIA "estilo" InvestingPro
 (misma familia de modelos y misma idea de consolidar en un unico valor justo), NO replica sus cifras. Es un valor
-estimado por modelos con supuestos explicitos (WACC, g, multiplos objetivo); no es un precio objetivo, ni una
-prediccion, ni asesoria financiera. Es ADITIVO: no modifica ni sustituye los niveles tecnicos de compra ni los
-pisos de ``valuation_floors``.
+estimado por modelos con supuestos explicitos; no es un precio objetivo, ni una prediccion, ni asesoria financiera.
+Los parametros de los dos escenarios (WACC, g∞, topes, compresion de multiplos...) son SUPUESTOS DE ESCENARIO fijados
+de antemano, no predicciones. Solo existen "medio" y "pesimista". Es ADITIVO: no modifica ni sustituye los niveles
+tecnicos de compra ni los pisos de ``valuation_floors``.
 
-Flujo (sin red salvo ``extraer_entradas``)
-------------------------------------------
-1. ``extraer_entradas(ticker, tk_obj, df, info)`` arma UNA vez un ``EntradasValoracion`` (liviano, sin DataFrames,
-   serializable con ``to_dict``) reutilizando los helpers XBRL de ``valuation_floors`` (``_facts``, ``_flujo_trimestral``,
-   ``_serie_concepto``, ``_factor_split``). No hace ninguna peticion a yfinance (usa el ``df`` y el ``info`` ya
-   descargados); la unica consulta externa es ``Company.get_facts()`` de EDGAR (que edgartools reutiliza de su cache al
-   ser la misma que hace ``calcular_pisos_valoracion``). Todo dato que no se pueda obtener es ``None``, nunca 0.
-2. ``calcular_modelos(entradas, params)`` devuelve la lista de 15 modelos (funcion pura).
-3. ``agregar_valor_justo(modelos, modelos_activos, margen_seguridad, precio_actual)`` consolida (funcion pura).
-   La UI recalcula 2 y 3 en memoria al mover un slider o una casilla.
+Flujo
+-----
+1. ``extraer_entradas(ticker, tk_obj, df, info, facts=None, modo=None, anios=None, rf=None)`` arma UNA vez un
+   ``EntradasValoracion`` (liviano, serializable con ``to_dict``) reutilizando los helpers XBRL de ``valuation_floors``.
+   ``modo="local"`` (por defecto sin variable PORT): hasta ``ANIOS_LOCAL`` = 10 anios fiscales + TTM y cache SQLite en disco
+   (``src/reporting/cache_local.py``). ``modo="nube"`` (variable PORT): ``ANIOS_NUBE`` = 3 anios, sin cache en disco y
+   ``gc.collect()`` al terminar. Consulta ^TNX para la Rf (cache 24 h, respaldo 4.25 %). Dato faltante = None, nunca 0.
+2. ``calcular_escenarios(entradas, params, modelos_activos, margen_seguridad)`` (funcion pura, sin red: mover sliders
+   es instantaneo) devuelve ``{"medio", "pesimista", "modelos", "supuestos", ...}``. ``calcular_modelos(e, p, escenario)``
+   y ``agregar_valor_justo`` siguen disponibles (escenario Medio por defecto).
+3. ``serie_valor_justo_historica(entradas, df, ...)``: curva historica del Valor Justo Medio con 6 bandas (+-10/20/30 %)
+   y proyeccion ilustrativa de 12 meses (ver su docstring: PIT, suavizado causal, ancla y limites).
 
-Modelos (ids estables)
-----------------------
-Tasas: WACC = E/(D+E)*ke + D/(D+E)*kd*(1-t) con ke = rf + beta*ERP (CAPM), acotado a [WACC_MIN, WACC_MAX]. Un WACC
-del usuario (``ParametrosValoracion.wacc``) reemplaza al automatico y desplaza ke en paralelo (el delta del WACC
-dividido por el peso del patrimonio, con piso ``WE_MIN_AJUSTE_KE``, que es lo que mueve ke si kd no cambia). La tasa
-impositiva efectiva LTM tiene piso ``TASA_MIN`` (una tasa de 0,5 % de un ano no se proyecta a perpetuidad).
-Todas las tasas, rf, ERP y multiplos por defecto son PARAMETROS (no datos de mercado en vivo).
+Parametros por escenario (constantes con nombre al inicio del modulo)
+---------------------------------------------------------------------
+* Rf = ^TNX (/100, valido 0.5-12 %; respaldo 4.25 %); ERP 4.5 %; beta de Blume = 2/3*beta_raw + 1/3;
+  ke = Rf + beta*ERP; kd despues de impuestos = kd*(1-t); pesos E/(D+E) y D/(D+E) reales.
+* WACC Medio = clip(WACC, 8.0 %, 11.5 %). WACC Pesimista = max(WACC Medio vigente + 200 pb, 12.5 %).
+* g∞: 3.5 % Medio / 2.5 % Pesimista (el Pesimista nunca supera al Medio vigente). El DCF exige WACC - g∞ >= 2.5 pp.
+* DCF explicito de 10 anios (``dcf_10y_*``; los ids ``dcf_5y_*`` son la variante corta del MISMO motor con el valor
+  terminal en el anio 5) en 2 etapas con convencion de MITAD DE ANIO ``DF_t = (1+WACC)^-(t-0.5)``:
+  etapa 1 (anios 1-3) crece ``FRACCION_CRECIMIENTO`` = 65 % del crecimiento fundamental, topado a 42 % (Medio) / 15 %
+  (Pesimista); etapa 2 (anios 4..N) decae linealmente hasta g∞ y los margenes convergen linealmente a la mediana
+  recortada historica de 3-5 anios (FCF/Ingresos en el DCF por ingresos; FCFF/EBITDA en el de EBITDA, con tope de
+  margen 55 % / 30 % de ingresos). El DCF de FCF crece el FCF con la misma trayectoria (sin tope de margen). Flujo
+  ciclico => base = media de 5 anios y crecimiento = g∞. FCFF = FCF + intereses*(1-t).
+  VALOR TERMINAL: ``TV_N = FCF_N*(1+g∞)/(WACC-g∞)`` se descuenta con el MISMO factor del ultimo flujo explicito,
+  ``DF_{N-0.5}`` (9.5 con N = 10): como los flujos de la perpetuidad llegan a mitad de cada anio, su valor en t = N es
+  ``TV_N*(1+WACC)^0.5``; descontar a t = N subvaluaria el terminal en un factor (1+WACC)^0.5 (eso solo es correcto con
+  un multiplo de salida). Valor por accion = (VP + caja - deuda) / acciones diluidas.
+* Crecimiento fundamental = mezcla renormalizada (sobre lo disponible) de ``PESO_CAGR`` 50 % (CAGR winsorizado a 3Y y 5Y:
+  variaciones anuales recortadas a [-50 %, +100 %] y, con >= 4, winsorizadas a los percentiles 10/90 y COMPUESTAS
+  geometricamente), ``PESO_MOMENTUM`` 20 % (variacion YoY del TTM) y ``PESO_FORWARD`` 30 % (yfinance ``revenueGrowth`` para
+  ingresos; ``forwardEps/trailingEps - 1`` o ``earningsGrowth`` para beneficios). Sin datos no se inventa 0: g∞.
+* Multiplos (P/E, EV/EBITDA, EV/Ingresos, P/B, P/FCF): MEDIANA RECORTADA de los multiplos propios (precio a +45 dias del
+  cierre, PIT) acotada a ``RANGOS_MULTIPLOS``, mezclada 70 % propio + 30 % benchmark sectorial (``BENCHMARK_SECTORIAL``,
+  APROXIMACION fijada a mano, fecha ``BENCHMARK_FECHA``; sin sector en la tabla solo el propio). Pesimista: -15 %.
+* DDM (Gordon con ke del escenario), EPV (Greenwald: se EXCLUYE en el Medio si los ingresos crecen > 20 %; en el
+  Pesimista se incluye como piso de crecimiento cero), Graham, Lynch (tope de crecimiento 25 % Medio / 15 % Pesimista).
 
-* dcf_5y_fcf / dcf_10y_fcf: FCF (OCF - CapEx, XBRL) llevado a FCFF sumando los intereses despues de impuestos
-  (``FCF + gasto_interes_ltm*(1-t)``; sin gasto de intereses se suma 0): el OCF ya esta neto de intereses y se descuenta
-  al WACC restando ademas la deuda, asi que sin este ajuste los intereses se contarian dos veces. P/FCF NO se ajusta (es
-  un multiplo de patrimonio). Se proyecta N anios; el crecimiento parte de ``min(CRECIMIENTO_TOPE, HAIRCUT*CAGR
-  historico)`` y converge linealmente hacia g en el anio N; valor terminal de Gordon ``FCF_N*(1+g)/(WACC-g)``
-  descontado; + caja - deuda total; / acciones diluidas. Si el flujo es CICLICO (``es_ciclico``: CV > ``VOL_FCF_ALTA`` y
-  >= ``MIN_INVERSIONES_CICLO`` cambios de direccion) la base es la media de los ultimos ``N_NORMALIZACION`` anios y el
-  crecimiento inicial es g ("flujo ciclico normalizado"): extrapolar valle-pico de un ciclo de commodities infla el DCF.
-  Con historia pero menos de ``MIN_ANIOS_FCF`` anios de FCF positivo el DCF de FCF no aplica (no se extrapola un solo
-  ano bueno).
-* dcf_5y_ebitda / dcf_10y_ebitda: EBITDA = EBIT + D&A (LTM) proyectado igual; flujo anual
-  ``EBITDA*(1-t) + D&A*t - CapEx - dNWC`` con D&A y CapEx como proporcion constante del EBITDA LTM, dNWC =
-  ``nwc/EBITDA`` (acotado) por la variacion del EBITDA (0 si no hay balance), t = tasa efectiva (21 % si falta).
-* dcf_5y_revenue / dcf_10y_revenue: ingresos proyectados con el mismo crecimiento (CAGR de ingresos) y margen FCF que
-  converge linealmente desde el margen LTM hasta ``min(MARGEN_FCF_TOPE, mediana historica del margen FCF)``.
-* pe: EPS LTM * P/E objetivo; ev_ebitda: (EBITDA*m + caja - deuda)/acciones; ev_revenue analogo; pb: BVPS * P/B
-  objetivo; p_fcf: FCF/accion * P/FCF objetivo. Multiplo objetivo = MEDIANA de los multiplos propios de los ultimos
-  anios (instantaneas anuales con el precio sin ajuste por dividendos y 45 dias de rezago de publicacion; minimo
-  ``MIN_PUNTOS_MULTIPLO`` puntos) acotada a ``RANGOS_MULTIPLOS``; o el valor fijado por el usuario.
-* ddm: Gordon ``D0*(1+g)/(ke-g)``; no aplica sin dividendo, con rendimiento < ``DDM_RENDIMIENTO_MIN`` (dividendo
-  simbolico) o con ke <= g.
-* epv (Greenwald): ``EBIT*(1-t)/WACC`` (sin crecimiento; el ajuste de capex de mantenimiento supone capex de
-  mantenimiento = D&A, asi que NOPAT ajustado = NOPAT) + caja - deuda, / acciones.
-* graham: ``sqrt(22.5*EPS*BVPS)``; lynch (PEG = 1): ``EPS * min(25, CAGR esperado de EPS en %)``.
+Consolidacion (``agregar_valor_justo``): filtra por modelos activos -> descarta no aplicables o <= 0 -> IQR (>= 4 validos;
+ancho minimo ``IQR_PISO_REL``*mediana) -> promedio IGUALANDO FAMILIAS (1/3 DCF + 1/3 Multiplos + 1/3 Valor/Dividendos;
+se renormaliza si una familia no tiene modelos). CAMBIO respecto de la version anterior: antes era el promedio simple.
+Promedio simple, mediana, CV e incertidumbre (Baja/Media/Alta, con degradacion por pocas familias) se conservan como
+informacion complementaria. ``complementarias`` y ``dcf_inverso`` (escenario Medio) siguen disponibles.
 
-Agregacion (``agregar_valor_justo``): filtra por modelos activos -> descarta no aplicables o precio <= 0 ->
-con >= ``MIN_MODELOS_IQR`` validos excluye outliers fuera de [Q1-a, Q3+a] con a = max(1.5*IQR, ``IQR_PISO_REL``*mediana)
-(cuartiles con interpolacion lineal, numpy; el piso evita que con modelos casi identicos, IQR ~ 0, una diferencia del 1 %
-sea "outlier") -> fair_value = promedio simple -> upside = (fv-px)/px*100 -> precio con margen de seguridad
-= fv*(1-MoS) -> incertidumbre por CV = sigma/mu (sigma POBLACIONAL, ddof=0: se mide la dispersion de los modelos
-usados, no se estima una poblacion mayor): Baja si CV < CV_BAJO, Media entre CV_BAJO y CV_ALTO, Alta si CV > CV_ALTO
-o si quedan menos de ``MIN_MODELOS_CONFIABLE`` modelos usados. "Baja" se degrada a "Media" si los modelos usados
-pertenecen a menos de ``MIN_FAMILIAS_BAJA`` grupos de familia (``GRUPOS_FAMILIA``): modelos derivados de las mismas
-cifras (p. ej. P/E, P/B, DDM, Graham y Lynch de un banco salen de EPS y valor contable) coinciden por construccion, no por
-confirmacion independiente. El resultado incluye ``cv_prefiltro`` (CV antes del IQR) y ``familias_usadas``.
-``complementarias`` (solo informativa) da mediana, submedias por grupo y promedio igualando grupos; ``dcf_inverso`` da el
-WACC y el crecimiento implicitos en el precio. El margen de seguridad se acota a [0, ``MARGEN_SEGURIDAD_MAX``].
-
-Limitaciones (visibles en la UI): muy sensible a WACC y g; el valor terminal domina los DCF; datos LTM (trailing)
-de SEC EDGAR con rezago; no aplica bien a bancos/aseguradoras (EBITDA/FCF), ciclicas ni empresas sin beneficios.
+Limitaciones (visibles en la UI): muy sensible a WACC y g∞; el valor terminal domina los DCF; datos TTM de SEC EDGAR con
+rezago; no aplica bien a bancos/aseguradoras (EBITDA/FCF), ciclicas ni empresas sin beneficios; el techo de crecimiento
+de 42 % y de margen de 55 % del Medio pueden dar valores varias veces el precio en negocios de hipercrecimiento.
 """
 from __future__ import annotations
 
@@ -78,12 +69,12 @@ import numpy as np
 import pandas as pd
 
 # --- Constantes documentadas (la UI las lee de aqui; no se hardcodean en otro sitio) ------------------------
-CRECIMIENTO_TERMINAL_DEFECTO = 0.025   # g por defecto (mismo valor que valuation_floors.CRECIMIENTO_TERMINAL)
+CRECIMIENTO_TERMINAL_DEFECTO = 0.035   # g∞ del escenario Medio (supuesto de escenario fijado por el usuario; antes 2.5 %)
 MARGEN_SEGURIDAD_DEFECTO = 0.25
-RF_DEFECTO = 0.045                     # tasa libre de riesgo por defecto: PARAMETRO (no se consulta ^TNX; el 10Y ronda 4.5-4.9 %)
-ERP_DEFECTO = 0.05                     # prima de riesgo de mercado por defecto: PARAMETRO
+RF_DEFECTO = 0.0425                    # Rf de respaldo si ^TNX no esta disponible o sale del rango valido (supuesto fijado: 4.25 %)
+ERP_DEFECTO = 0.045                    # prima de riesgo de mercado (supuesto fijado: 4.5 %)
 BETA_DEFECTO, BETA_MIN, BETA_MAX = 1.0, 0.7, 2.0   # betas bajas (defensivas) se acotan: la sensibilidad del DCF al WACC es enorme
-WACC_MIN, WACC_MAX = 0.075, 0.14       # limites del WACC automatico
+WACC_MIN, WACC_MAX = 0.08, 0.115       # limites del WACC automatico del escenario Medio: [8.0 %, 11.5 %]
 SPREAD_DEUDA_DEFECTO = 0.015           # kd = rf + spread si no hay gasto por intereses fiable
 KD_MIN, KD_MAX = 0.02, 0.12            # rango razonable del costo de deuda implicito (intereses/deuda)
 TASA_IMPOSITIVA_DEFECTO = 0.21         # tasa federal de EE. UU. si no hay tasa efectiva
@@ -124,11 +115,81 @@ WE_MIN_AJUSTE_KE = 0.25                # piso del peso del patrimonio al traslad
 UMBRAL_AVISO_CAJA = 0.10               # aviso si la caja XBRL difiere > 10 % de la de yfinance (sin sobrescribir)
 # Procesadores de pago con industria "Credit Services" donde EBITDA/FCF si son informativos (no son prestamistas)
 PROCESADORES_PAGO = frozenset({"V", "MA", "PYPL", "FI", "FISV", "GPN", "FIS", "XYZ", "SQ", "TOST", "JKHY", "WU", "CPAY"})
-DIF_MIN_WACC_G = 0.01                  # DCF/EPV/DDM exigen (tasa de descuento - g) >= 1 pp (el valor terminal explota si no)
+DIF_MIN_WACC_G = 0.025                 # DCF/EPV/DDM exigen (tasa de descuento - g∞) >= 2.5 pp (el valor terminal explota si no)
 PB_IMPLICITO_RANGO = (0.05, 100.0)     # precio / BVPS fuera de este rango => dato por accion de otra clase (BRK-B): se descarta
 PE_IMPLICITO_RANGO = (0.05, 2000.0)    # precio / EPS (EPS > 0) fuera de este rango => EPS inconsistente con el precio
 SUBCONTEO_INFO = 0.5                   # caja/deuda XBRL < 50 % del ``info`` de yfinance: se usa yfinance
 MAX_ANTIGUEDAD_LTM_DIAS = 420          # un LTM mas viejo que esto se considera no disponible
+
+# --- Escenarios (SUPUESTOS DE ESCENARIO fijados por el usuario; NO son predicciones) ---------------------------------
+# Solo existen dos escenarios: "medio" y "pesimista". No hay escenario optimista y no debe aparecer en ninguna salida.
+ESCENARIOS = ("medio", "pesimista")
+ETIQUETAS_ESCENARIO = {"medio": "Medio", "pesimista": "Pesimista"}
+ANIOS_LOCAL, ANIOS_NUBE = 10, 3        # anios fiscales de historia: local (sin recortes) vs nube (visor ligero)
+RF_RANGO_PCT = (0.5, 12.0)             # rango valido (en %) de ^TNX; fuera de el se usa RF_DEFECTO
+BLUME_PESO_RAW = 2.0 / 3.0             # beta de Blume: 2/3 * beta_raw + 1/3 (la beta tiende a 1)
+BETA_RAW_MIN, BETA_RAW_MAX = 0.0, 4.0  # solo para descartar datos basura; la suavizacion de Blume ya modera extremos
+WACC_PESIMISTA_SPREAD = 0.02           # WACC Pesimista = WACC Medio vigente + 200 pb ...
+WACC_PESIMISTA_MIN = 0.125             # ... con minimo 12.5 % (estres)
+N_ANIOS_DCF = 10                       # horizonte explicito del motor DCF principal
+N_ANIOS_DCF_CORTO = 5                  # variante corta (ids dcf_5y_*): mismo motor, valor terminal en el anio 5
+ANIOS_ETAPA1 = 3                       # etapa 1 = anios 1..3 (crecimiento alto); etapa 2 = anios 4..N (decaimiento + margenes)
+FRACCION_CRECIMIENTO = 0.65            # crecimiento de la etapa 1 = 65 % del crecimiento fundamental compuesto
+TOPE_CRECIMIENTO_ETAPA1 = {"medio": 0.42, "pesimista": 0.15}
+G_TERMINAL = {"medio": 0.035, "pesimista": 0.025}          # g∞ por escenario
+TOPE_MARGEN = {"medio": 0.55, "pesimista": 0.30}           # tope del margen objetivo (FCF/Ingresos y FCF/EBITDA)
+DIF_MIN_WACC_G_DCF = DIF_MIN_WACC_G    # DCF exige WACC - g∞ >= 2.5 pp (si no, el DCF no aplica con motivo)
+COMPRESION_MULTIPLOS = {"medio": 0.0, "pesimista": -0.15}  # castigo de compresion de multiplos objetivo
+EPV_CRECIMIENTO_MAX = 0.20             # Medio: EPV (crecimiento cero) se excluye si los ingresos crecen mas de 20 % anual
+LYNCH_TOPE_PCT_ESC = {"medio": LYNCH_CRECIMIENTO_TOPE_PCT, "pesimista": 15.0}   # tope del crecimiento (%) de Lynch
+# Crecimiento fundamental = mezcla (renormalizada sobre lo disponible) de CAGR winsorizado, momentum YoY TTM y forward
+PESO_CAGR, PESO_MOMENTUM, PESO_FORWARD = 0.50, 0.20, 0.30
+CAGR_VENTANAS = (3, 5)                 # CAGR winsorizado a 3Y y 5Y (se promedian las ventanas disponibles)
+WINSOR_PCT = (10.0, 90.0)              # percentiles de winsorizacion de las variaciones anuales (si hay >= 4 variaciones)
+VARIACION_MIN, VARIACION_MAX = -0.50, 1.00   # recorte duro de cada variacion anual antes de componer
+FORWARD_MIN, FORWARD_MAX = -0.50, 1.00       # recorte del crecimiento forward de yfinance
+MARGEN_ANIOS_MEDIANA = (3, 5)          # mediana recortada de los ultimos 3 a 5 anios (margen / conversion historica)
+RECORTE_MEDIANA = 0.20                 # fraccion recortada en cada extremo (con >= 5 puntos) en medianas recortadas
+# Multiplos: mezcla del multiplo propio (mediana recortada) con un benchmark sectorial fijado a mano
+PESO_MULTIPLO_PROPIO = 0.70            # el resto (0.30) es el benchmark sectorial si el sector esta en la tabla
+BENCHMARK_FECHA = "2026-11"
+# APROXIMACION fijada A MANO (no es un dato de mercado en vivo) de medianas sectoriales de largo plazo, fecha BENCHMARK_FECHA.
+BENCHMARK_SECTORIAL: dict[str, dict[str, float]] = {
+    "Technology": {"pe": 26.0, "ev_ebitda": 18.0, "ev_revenue": 6.0, "pb": 7.0, "p_fcf": 28.0},
+    "Healthcare": {"pe": 21.0, "ev_ebitda": 14.0, "ev_revenue": 3.5, "pb": 4.0, "p_fcf": 22.0},
+    "Financial Services": {"pe": 13.0, "ev_ebitda": 10.0, "ev_revenue": 2.5, "pb": 1.4, "p_fcf": 12.0},
+    "Consumer Cyclical": {"pe": 21.0, "ev_ebitda": 13.0, "ev_revenue": 1.6, "pb": 4.5, "p_fcf": 22.0},
+    "Consumer Defensive": {"pe": 21.0, "ev_ebitda": 14.0, "ev_revenue": 1.8, "pb": 4.5, "p_fcf": 21.0},
+    "Energy": {"pe": 12.0, "ev_ebitda": 6.0, "ev_revenue": 1.2, "pb": 1.8, "p_fcf": 11.0},
+    "Industrials": {"pe": 21.0, "ev_ebitda": 14.0, "ev_revenue": 2.2, "pb": 4.0, "p_fcf": 22.0},
+    "Utilities": {"pe": 18.0, "ev_ebitda": 11.0, "ev_revenue": 2.6, "pb": 1.9, "p_fcf": 25.0},
+    "Real Estate": {"pe": 30.0, "ev_ebitda": 17.0, "ev_revenue": 7.0, "pb": 1.8, "p_fcf": 20.0},
+    "Basic Materials": {"pe": 16.0, "ev_ebitda": 9.0, "ev_revenue": 1.6, "pb": 2.0, "p_fcf": 16.0},
+    "Communication Services": {"pe": 19.0, "ev_ebitda": 11.0, "ev_revenue": 2.8, "pb": 3.0, "p_fcf": 17.0},
+}
+# Cache en disco (solo local): version del codigo/esquema de las entradas; subirla invalida las entradas cacheadas
+def _version_codigo(base: str = "fv-esc-1") -> str:
+    """Version = base + hash del codigo fuente de este modulo: cualquier cambio del motor/extraccion invalida el cache."""
+    try:
+        import hashlib
+        with open(__file__, "rb") as fh:
+            return f"{base}-{hashlib.md5(fh.read()).hexdigest()[:8]}"
+    except OSError:     # congelado (PyInstaller) o sin fuente: se usa solo la base
+        return base
+
+
+VERSION_CODIGO = _version_codigo()
+# Serie historica
+BANDAS_PCT = (30, 20, 10, -10, -20, -30)      # bandas simetricas alrededor del Valor Justo Medio
+PROYECCION_DIAS = 365                  # proyeccion ilustrativa hacia adelante: 12 meses
+PROYECCION_AMORTIGUACION = 0.5         # g_proy = 0.5*g_etapa1 + 0.5*g∞ (promedio de los DCF Medio), acotado a [0, 15 %]
+PROYECCION_TOPE = 0.15
+PASO_SERIE_DIAS = 7                    # muestreo de la serie devuelta (semanal)
+ANCLA_SEPARACION_DIAS = 7              # un reporte publicado a menos de esto de la ultima vela lo reemplaza el ancla
+VJ_ABSURDO_X = 10.0                    # un punto trimestral con valor justo > 10x o < 1/10 del precio de su fecha se descarta
+SALTO_ACCIONES_X = 5.0                 # acciones de un trimestre que difieren > 5x de la mediana de sus vecinos: punto descartado
+SALTO_ACCIONES = 0.30                  # una serie de acciones que se desvia > 30 % de sus vecinas (que coinciden) es un glitch
+TRANSICION_DIAS = 45                   # suavizado CAUSAL: tras cada reporte el valor justo transita en 45 dias (smoothstep)
 
 # (id, nombre, familia)
 MODELOS: tuple[tuple[str, str, str], ...] = (
@@ -204,6 +265,31 @@ class EntradasValoracion:
     datos_inconsistentes: list[str] = field(default_factory=list)   # p. ej. ["bvps"]: descartados por inconsistentes
     fuentes: dict[str, str] = field(default_factory=dict)
     avisos: list[str] = field(default_factory=list)
+    # --- Extension multi-anio (todo opcional: las entradas antiguas siguen siendo validas) -------------------------------
+    modo: str | None = None                # "local" | "nube" con el que se extrajo
+    anios_historia: int | None = None      # anios fiscales de historia pedidos (10 local / 3 nube)
+    crec_forward_ingresos: float | None = None     # info["revenueGrowth"] (forward/ultimo trimestre; no PIT)
+    crec_forward_beneficios: float | None = None   # forwardEps/trailingEps - 1, o info["earningsGrowth"]
+    neto_ltm: float | None = None          # beneficio neto LTM
+    ocf_ltm: float | None = None           # flujo de caja operativo LTM
+    patrimonio: float | None = None        # patrimonio neto (ultimo balance)
+    dividendos_pagados_ltm: float | None = None   # dividendos pagados LTM (XBRL PaymentsOfDividends)
+    # Series anuales (LTM al cierre de cada ejercicio, de mas antiguo a mas reciente) alineadas con ``hist_fechas``;
+    # None = dato no disponible en esa fecha.
+    hist_fechas: list[str] = field(default_factory=list)
+    hist_ebit: list[float | None] = field(default_factory=list)
+    hist_neto: list[float | None] = field(default_factory=list)
+    hist_ocf: list[float | None] = field(default_factory=list)
+    hist_capex: list[float | None] = field(default_factory=list)
+    hist_dividendos: list[float | None] = field(default_factory=list)
+    hist_tasa: list[float | None] = field(default_factory=list)
+    hist_deuda: list[float | None] = field(default_factory=list)
+    hist_caja: list[float | None] = field(default_factory=list)
+    hist_patrimonio: list[float | None] = field(default_factory=list)
+    hist_acciones: list[float | None] = field(default_factory=list)
+    # Serie TTM por cierre trimestral (para la serie historica del Valor Justo): lista de dicts con ``fecha`` y TTM de
+    # ing, ebit, ebitda, fcf, eps, neto, da, capex, interes, impuesto, pre + saldos caja, deuda, patrimonio, acciones.
+    serie_ttm: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -304,17 +390,47 @@ def _clip(x: float, lo: float, hi: float) -> float:
 
 
 # --- Tasas y supuestos -----------------------------------------------------------------------------------------
-def calcular_tasas(e: EntradasValoracion, p: ParametrosValoracion) -> dict:
-    """ke (CAPM), kd, WACC automatico y WACC usado. Si ``p.wacc`` esta fijado, ke se desplaza en paralelo.
 
-    El desplazamiento de ke es ``(WACC_usuario - WACC_auto) / max(peso_patrimonio, WE_MIN_AJUSTE_KE)``: con deuda, mover el
-    WACC un punto mueve ke mas de un punto (WACC = w_e*ke + w_d*kd*(1-t) con kd fijo)."""
-    rf = _f(p.rf) if p.rf is not None else (_f(e.rf) if _f(e.rf) is not None else RF_DEFECTO)
+G_RANGO_AVISO = (0.015, 0.045)         # g∞ del usuario fuera de este rango => aviso (el motor igualmente lo usa)
+
+
+def _validar_escenario(escenario: str) -> str:
+    if escenario not in ESCENARIOS:
+        raise ValueError(f"escenario desconocido: {escenario!r}; solo existen {ESCENARIOS}")
+    return escenario
+
+
+def beta_blume(beta_raw: float) -> float:
+    """Beta suavizada de Blume: 2/3 * beta_raw + 1/3 (p. ej. 1.5 -> 1.3333...)."""
+    return BLUME_PESO_RAW * beta_raw + (1.0 - BLUME_PESO_RAW)
+
+
+def calcular_tasas(e: EntradasValoracion, p: ParametrosValoracion, escenario: str = "medio") -> dict:
+    """Tasas del ``escenario``: Rf, beta de Blume, ke (CAPM), kd, WACC y g∞.
+
+    Medio: ``wacc = clip(E/(D+E)*ke + D/(D+E)*kd*(1-t), WACC_MIN, WACC_MAX)`` = [8.0 %, 11.5 %]; un WACC del usuario
+    (``p.wacc``) lo reemplaza (con aviso si sale del rango) y desplaza ke en paralelo
+    (``(WACC_usuario - WACC_auto) / max(peso_patrimonio, WE_MIN_AJUSTE_KE)``). g∞ = ``p.g`` (3.5 % por defecto).
+    Pesimista: se DERIVA del Medio vigente: ``wacc = max(wacc_medio + 200 pb, 12.5 %)`` y ``g∞ = min(2.5 %, g_medio)``;
+    ke se desplaza igual que el WACC. Rf: ``p.rf`` > ``e.rf`` (^TNX) > ``RF_DEFECTO`` (4.25 %). ERP = ``p.erp`` (4.5 %).
+    La tasa impositiva efectiva tiene piso ``TASA_MIN``."""
+    _validar_escenario(escenario)
+    if p.rf is not None and _f(p.rf) is not None:
+        rf, rf_origen = _f(p.rf), "usuario"
+    elif _f(e.rf) is not None:
+        rf, rf_origen = _f(e.rf), "^TNX (10Y del Tesoro de EE. UU.)"
+    else:
+        rf, rf_origen = RF_DEFECTO, "respaldo fijo (^TNX no disponible)"
+    erp = _f(p.erp) if _f(p.erp) is not None else ERP_DEFECTO
     beta_raw = _f(e.beta)
-    beta = _clip(beta_raw, BETA_MIN, BETA_MAX) if beta_raw is not None else BETA_DEFECTO
+    if beta_raw is not None:
+        beta_raw = _clip(beta_raw, BETA_RAW_MIN, BETA_RAW_MAX)
+        beta = beta_blume(beta_raw)
+    else:
+        beta = BETA_DEFECTO
     t_raw = _f(e.tasa_impositiva)
     t = _clip(t_raw, TASA_MIN, TASA_IMPOSITIVA_MAX) if t_raw is not None else TASA_IMPOSITIVA_DEFECTO
-    ke = rf + beta * p.erp
+    ke = rf + beta * erp
     deuda = _f(e.deuda_total)
     interes = _f(e.gasto_interes_ltm)
     kd, kd_origen = rf + SPREAD_DEUDA_DEFECTO, "rf + spread por defecto"
@@ -328,55 +444,160 @@ def calcular_tasas(e: EntradasValoracion, p: ParametrosValoracion) -> dict:
         w_d, w_e = 0.0, 1.0
     wacc_bruto = w_e * ke + w_d * kd * (1.0 - t)
     wacc_auto = _clip(wacc_bruto, WACC_MIN, WACC_MAX)
-    wacc = _f(p.wacc) if p.wacc is not None else wacc_auto
-    ke_usado = ke + (wacc - wacc_auto) / max(w_e, WE_MIN_AJUSTE_KE)
+    wacc_medio = _f(p.wacc) if p.wacc is not None else wacc_auto
+    ke_medio = ke + (wacc_medio - wacc_auto) / max(w_e, WE_MIN_AJUSTE_KE)
+    g_medio = _f(p.g) if _f(p.g) is not None else G_TERMINAL["medio"]
+    avisos = []
+    if p.wacc is not None and not WACC_MIN - 1e-12 <= wacc_medio <= WACC_MAX + 1e-12:
+        avisos.append(f"WACC del usuario {wacc_medio * 100:.1f} % fuera del rango del escenario Medio "
+                      f"[{WACC_MIN * 100:.1f} %, {WACC_MAX * 100:.1f} %]")
+    if not G_RANGO_AVISO[0] - 1e-12 <= g_medio <= G_RANGO_AVISO[1] + 1e-12:
+        avisos.append(f"g∞ {g_medio * 100:.1f} % fuera del rango habitual [{G_RANGO_AVISO[0] * 100:.1f} %, "
+                      f"{G_RANGO_AVISO[1] * 100:.1f} %]")
+    if escenario == "medio":
+        wacc, wacc_auto_esc, ke_usado, g = wacc_medio, wacc_auto, ke_medio, g_medio
+    else:
+        wacc = max(wacc_medio + WACC_PESIMISTA_SPREAD, WACC_PESIMISTA_MIN)
+        wacc_auto_esc = max(wacc_auto + WACC_PESIMISTA_SPREAD, WACC_PESIMISTA_MIN)
+        ke_usado = ke_medio + (wacc - wacc_medio) / max(w_e, WE_MIN_AJUSTE_KE)
+        g = min(G_TERMINAL["pesimista"], g_medio)
     topes_ke, topes_wacc = [], []
-    if beta_raw is not None and beta != beta_raw:
-        topes_ke.append(f"beta {beta_raw:.2f} acotada a {beta:.2f}")
-    if p.wacc is None and wacc_bruto != wacc_auto:
+    if _f(e.beta) is not None and beta_raw != _f(e.beta):
+        topes_ke.append(f"beta {_f(e.beta):.2f} acotada a {beta_raw:.2f} antes de Blume")
+    if escenario == "medio" and p.wacc is None and wacc_bruto != wacc_auto:
         topes_wacc.append(f"WACC {wacc_bruto * 100:.2f} % acotado a {wacc_auto * 100:.2f} %")
-    return {"rf": rf, "erp": p.erp, "beta": beta, "beta_origen": "yfinance (acotada)" if beta_raw is not None
+    if escenario == "pesimista" and wacc == WACC_PESIMISTA_MIN and wacc_medio + WACC_PESIMISTA_SPREAD < WACC_PESIMISTA_MIN:
+        topes_wacc.append(f"WACC Pesimista: mínimo {WACC_PESIMISTA_MIN * 100:.1f} % activo")
+    return {"escenario": escenario, "rf": rf, "rf_origen": rf_origen, "erp": erp, "beta": beta, "beta_raw": beta_raw,
+            "beta_origen": "yfinance, suavizada de Blume (2/3 raw + 1/3)" if beta_raw is not None
             else "no disponible: se usa el valor por defecto", "ke_capm": ke, "ke": ke_usado, "kd": kd,
             "kd_origen": kd_origen, "tasa_impositiva": t,
             "tasa_origen": "efectiva LTM (piso %.0f %%)" % (TASA_MIN * 100) if t_raw is not None else "por defecto (sin dato)",
-            "peso_deuda": w_d, "peso_capital": w_e, "wacc_auto": wacc_auto, "wacc": wacc,
-            "wacc_origen": "usuario" if p.wacc is not None else "automatico (CAPM + estructura de capital)",
-            "topes_ke": topes_ke, "topes_wacc": topes_wacc, "topes": topes_ke + topes_wacc}
+            "peso_deuda": w_d, "peso_capital": w_e, "wacc_bruto": wacc_bruto, "wacc_auto": wacc_auto_esc, "wacc": wacc,
+            "wacc_medio": wacc_medio, "g": g, "g_medio": g_medio,
+            "wacc_origen": ("usuario" if p.wacc is not None else "automatico (CAPM + estructura de capital)")
+            if escenario == "medio" else f"Medio vigente + {WACC_PESIMISTA_SPREAD * 1e4:.0f} pb (mín. {WACC_PESIMISTA_MIN * 100:.1f} %)",
+            "avisos": avisos, "topes_ke": topes_ke, "topes_wacc": topes_wacc, "topes": topes_ke + topes_wacc}
 
 
-def _tope_crecimiento(hist: list[float] | None) -> str | None:
-    """Texto si el crecimiento inicial historico (``HAIRCUT*CAGR``) queda acotado a [CRECIMIENTO_MIN, CRECIMIENTO_TOPE]."""
-    c = cagr(hist)
-    if c is None:
+
+def mediana_recortada(valores: list[float] | None, recorte: float = RECORTE_MEDIANA) -> float | None:
+    """Mediana recortada: con >= 5 puntos descarta ``floor(n*recorte)`` extremos de cada lado antes de la mediana."""
+    v = sorted(_limpiar(valores))
+    if not v:
         return None
-    bruto = HAIRCUT * c
-    if bruto > CRECIMIENTO_TOPE:
-        return f"crecimiento inicial {bruto * 100:.1f} % (CAGR {c * 100:.1f} %) topado a {CRECIMIENTO_TOPE * 100:.0f} %"
-    if bruto < CRECIMIENTO_MIN:
-        return f"crecimiento inicial {bruto * 100:.1f} % (CAGR {c * 100:.1f} %) acotado a {CRECIMIENTO_MIN * 100:.0f} %"
-    return None
+    k = int(len(v) * recorte) if len(v) >= 5 else 0
+    if k >= 1:
+        v = v[k:-k]
+    return float(np.median(v))
 
 
-def _crecimiento_inicial(hist: list[float] | None, g: float) -> tuple[float, str]:
+def _variaciones_anuales(hist: list[float] | None, anios: int) -> list[float]:
+    h = _limpiar(hist)[-(anios + 1):]
+    return [b / a - 1.0 for a, b in zip(h[:-1], h[1:]) if a > 0 and b > 0]
+
+
+def _winsorizar(variaciones: list[float]) -> np.ndarray:
+    """Recorte duro a [VARIACION_MIN, VARIACION_MAX] y, con >= 4 variaciones, winsorizacion a los percentiles WINSOR_PCT."""
+    x = np.clip(np.asarray(variaciones, dtype=float), VARIACION_MIN, VARIACION_MAX)
+    if len(x) >= 4:
+        lo, hi = np.percentile(x, WINSOR_PCT)
+        x = np.clip(x, lo, hi)
+    return x
+
+
+def cagr_winsorizado(hist: list[float] | None, anios: int) -> float | None:
+    """CAGR robusto a ``anios``: variaciones anuales (ambos extremos > 0) recortadas/winsorizadas y COMPUESTAS
+    geometricamente (``prod(1+r)^(1/n) - 1``). None con menos de 2 variaciones validas."""
+    rs = _variaciones_anuales(hist, anios)
+    if len(rs) < 2:
+        return None
+    x = _winsorizar(rs)
+    return float(np.prod(1.0 + x) ** (1.0 / len(x)) - 1.0)
+
+
+def momentum_yoy(hist: list[float] | None) -> float | None:
+    """Variacion del ultimo valor LTM frente al LTM de un anio antes (recortada); None si alguno es <= 0."""
+    h = _limpiar(hist)
+    if len(h) < 2 or h[-2] <= 0 or h[-1] <= 0:
+        return None
+    return _clip(h[-1] / h[-2] - 1.0, VARIACION_MIN, VARIACION_MAX)
+
+
+def crecimiento_fundamental(hist: list[float] | None, forward: float | None = None) -> dict:
+    """Crecimiento fundamental = ``PESO_CAGR*CAGR + PESO_MOMENTUM*momentum + PESO_FORWARD*forward`` renormalizado sobre
+    los componentes disponibles (CAGR = promedio de los CAGR winsorizados a 3Y y 5Y disponibles). Nunca devuelve 0 si
+    no hay datos: ``valor`` es None."""
+    c = [cagr_winsorizado(hist, n) for n in CAGR_VENTANAS]
+    cs = [v for v in c if v is not None]
+    fw = _f(forward)
+    comp = {"cagr": float(np.mean(cs)) if cs else None, "momentum": momentum_yoy(hist),
+            "forward": _clip(fw, FORWARD_MIN, FORWARD_MAX) if fw is not None else None}
+    pesos = {"cagr": PESO_CAGR, "momentum": PESO_MOMENTUM, "forward": PESO_FORWARD}
+    disp = {k: v for k, v in comp.items() if v is not None}
+    valor = (sum(pesos[k] * v for k, v in disp.items()) / sum(pesos[k] for k in disp)) if disp else None
+    return {"valor": valor, "componentes": {**comp, "cagr3": c[0], "cagr5": c[1]}, "pesos": pesos}
+
+
+def crecimiento_etapa1(hist: list[float] | None, forward: float | None, g_inf: float, escenario: str,
+                       fijo: float | None = None) -> dict:
+    """Crecimiento de la etapa 1 (anios 1-3): ``FRACCION_CRECIMIENTO (65 %) * crecimiento_fundamental`` acotado a
+    [CRECIMIENTO_MIN, tope del escenario] (42 % Medio / 15 % Pesimista). Flujo ciclico o sin datos => g∞ (con nota)."""
+    tope = TOPE_CRECIMIENTO_ETAPA1[escenario]
+    if fijo is not None:
+        return {"g1": float(fijo), "nota": "crecimiento inicial fijado (DCF inverso)", "tope": None, "fundamental": None}
     if es_ciclico(hist):
-        return g, "flujo cíclico normalizado: crecimiento inicial = g"
-    c = cagr(hist)
-    if c is None:
-        return g, "sin historia suficiente: crecimiento inicial = g"
-    g0 = _clip(HAIRCUT * c, CRECIMIENTO_MIN, CRECIMIENTO_TOPE)
-    return g0, f"CAGR historico {c * 100:.1f} % x {HAIRCUT} (acotado a [{CRECIMIENTO_MIN * 100:.0f} %, " \
-               f"{CRECIMIENTO_TOPE * 100:.0f} %])"
+        return {"g1": g_inf, "nota": "flujo cíclico normalizado: crecimiento etapa 1 = g∞", "tope": None, "fundamental": None}
+    cf = crecimiento_fundamental(hist, forward)
+    if cf["valor"] is None:
+        return {"g1": g_inf, "nota": "sin datos de crecimiento: etapa 1 = g∞ (no se inventa crecimiento)", "tope": None,
+                "fundamental": cf}
+    bruto = FRACCION_CRECIMIENTO * cf["valor"]
+    g1 = _clip(bruto, CRECIMIENTO_MIN, tope)
+    tope_txt = None
+    if bruto > tope:
+        tope_txt = f"crecimiento etapa 1 {bruto * 100:.1f} % topado a {tope * 100:.0f} %"
+    elif bruto < CRECIMIENTO_MIN:
+        tope_txt = f"crecimiento etapa 1 {bruto * 100:.1f} % acotado a {CRECIMIENTO_MIN * 100:.0f} %"
+    return {"g1": g1, "nota": f"{FRACCION_CRECIMIENTO * 100:.0f} % x crecimiento fundamental {cf['valor'] * 100:.1f} % "
+            f"(tope {tope * 100:.0f} %)", "tope": tope_txt, "fundamental": cf}
 
 
-def _base_crecimiento(hist: list[float] | None, ltm: float, g: float) -> tuple[float, float, bool, str | None]:
-    """(base, crecimiento inicial, ciclico, tope) de un flujo.
+def _tope_crecimiento(hist: list[float] | None, forward: float | None = None, escenario: str = "medio") -> str | None:
+    """Texto si el crecimiento de la etapa 1 queda acotado (None si no hay tope activo)."""
+    return crecimiento_etapa1(hist, forward, G_TERMINAL[escenario], escenario)["tope"]
 
-    Ciclico: base = media de los ultimos ``N_NORMALIZACION`` anios y crecimiento inicial = g. Si no: base = LTM y
-    crecimiento = ``min(CRECIMIENTO_TOPE, HAIRCUT*CAGR)`` (``tope`` describe el tope si esta activo)."""
+
+
+def _crecimiento_inicial(hist: list[float] | None, g: float, forward: float | None = None,
+                         escenario: str = "medio") -> tuple[float, str]:
+    """(crecimiento de la etapa 1, nota) del ``escenario`` con g∞ = ``g``."""
+    r = crecimiento_etapa1(hist, forward, g, escenario)
+    return r["g1"], r["nota"]
+
+
+def _trayectoria(g1: float, g_inf: float, n: int) -> list[float]:
+    """Crecimiento anual t=1..n: etapa 1 (t <= 3) = g1; etapa 2 decae LINEALMENTE hasta g∞ en t = n."""
+    out = []
+    for t in range(1, n + 1):
+        out.append(g1 if t <= ANIOS_ETAPA1 else g1 + (g_inf - g1) * (t - ANIOS_ETAPA1) / (n - ANIOS_ETAPA1))
+    return out
+
+
+def _convergencia(x0: float, x_obj: float, t: int, n: int) -> float:
+    """Valor en el anio t de una razon que converge linealmente de x0 (t <= 3) a x_obj (t = n)."""
+    return x0 if t <= ANIOS_ETAPA1 else x0 + (x_obj - x0) * (t - ANIOS_ETAPA1) / (n - ANIOS_ETAPA1)
+
+
+
+def _base_crecimiento(hist: list[float] | None, ltm: float, g: float, forward: float | None = None,
+                      escenario: str = "medio") -> tuple[float, float, bool, str | None]:
+    """(base, crecimiento etapa 1, ciclico, tope) de un flujo. Ciclico: base = media de los ultimos
+    ``N_NORMALIZACION`` anios y crecimiento = g∞."""
     if es_ciclico(hist):
         return float(np.mean(_limpiar(hist)[-N_NORMALIZACION:])), g, True, None
-    g0, _ = _crecimiento_inicial(hist, g)
-    return ltm, g0, False, _tope_crecimiento(hist)
+    r = crecimiento_etapa1(hist, forward, g, escenario)
+    return ltm, r["g1"], False, r["tope"]
 
 
 def _ajuste_fcff(e: EntradasValoracion, t: float) -> float:
@@ -385,9 +606,21 @@ def _ajuste_fcff(e: EntradasValoracion, t: float) -> float:
     return interes * (1.0 - t) if interes is not None and interes > 0 else 0.0
 
 
-def _margen_detalle(e: EntradasValoracion) -> dict:
-    """Margen FCF actual / objetivo para el DCF por ingresos (FCFF: suma los intereses despues de impuestos LTM)."""
-    vacio = {"actual": None, "objetivo": None, "origen": "FCF", "mediano": None, "tope_activo": False}
+
+def _historia_razon(num: list[float] | None, den: list[float] | None, ajuste: float = 0.0) -> list[float]:
+    """Razones ``(num_i + ajuste)/den_i`` de los ultimos MARGEN_ANIOS_MEDIANA[1] anios (alineadas por el final)."""
+    hn, hd = _limpiar(num), _limpiar(den)
+    n = min(len(hn), len(hd), MARGEN_ANIOS_MEDIANA[1])
+    return [(hn[len(hn) - n + i] + ajuste) / hd[len(hd) - n + i] for i in range(n) if hd[len(hd) - n + i] > 0] if n else []
+
+
+def _margen_detalle(e: EntradasValoracion, escenario: str = "medio") -> dict:
+    """Margen FCF/Ingresos actual y objetivo (FCFF: suma los intereses despues de impuestos LTM).
+
+    Objetivo = ``min(TOPE_MARGEN[escenario], mediana recortada de los ultimos 3-5 anios)``; con menos de 3 anios de
+    historia, el margen actual acotado por el tope."""
+    tope = TOPE_MARGEN[escenario]
+    vacio = {"actual": None, "objetivo": None, "origen": "FCF", "mediano": None, "tope_activo": False, "tope": tope}
     rev, fcf = _f(e.ingresos_ltm), _f(e.fcf_ltm)
     origen = "FCF"
     if rev is None or rev <= 0:
@@ -403,78 +636,117 @@ def _margen_detalle(e: EntradasValoracion) -> dict:
     else:
         ajuste = _ajuste_fcff(e, t) / rev   # el mismo ajuste (en puntos de margen) a la mediana historica
     actual = fcf / rev + ajuste
-    hf, hr = _limpiar(e.hist_fcf), _limpiar(e.hist_ingresos)
-    n = min(len(hf), len(hr))
-    margenes = [hf[-n + i] / hr[-n + i] for i in range(n) if hr[-n + i] > 0] if n else []
-    mediano = float(np.median(margenes)) + ajuste if len(margenes) >= MIN_PUNTOS_MULTIPLO and origen == "FCF" else actual
-    return {"actual": actual, "objetivo": min(MARGEN_FCF_TOPE, mediano), "origen": origen, "mediano": mediano,
-            "tope_activo": mediano > MARGEN_FCF_TOPE}
+    margenes = _historia_razon(e.hist_fcf, e.hist_ingresos)
+    mediano = (mediana_recortada(margenes) + ajuste) if len(margenes) >= MARGEN_ANIOS_MEDIANA[0] and origen == "FCF" else actual
+    return {"actual": actual, "objetivo": min(tope, mediano), "origen": origen, "mediano": mediano,
+            "tope_activo": mediano > tope, "tope": tope}
 
 
-def _margen_fcf(e: EntradasValoracion) -> tuple[float | None, float | None, str]:
+def _conversion_ebitda(e: EntradasValoracion, escenario: str, c0: float) -> dict:
+    """Conversion FCFF/EBITDA objetivo del DCF por EBITDA: mediana recortada de 3-5 anios acotada por el tope de margen
+    del escenario expresado en base EBITDA (``tope / margen EBITDA``, max 100 %). Sin historia: ``c0`` (sin convergencia)."""
+    tope = TOPE_MARGEN[escenario]
+    eb, rev = _f(e.ebitda_ltm), _f(e.ingresos_ltm)
+    t = _clip(_f(e.tasa_impositiva) if _f(e.tasa_impositiva) is not None else TASA_IMPOSITIVA_DEFECTO, TASA_MIN,
+              TASA_IMPOSITIVA_MAX)
+    razones = _historia_razon(e.hist_fcf, e.hist_ebitda, _ajuste_fcff(e, t))
+    mediano = mediana_recortada(razones) if len(razones) >= MARGEN_ANIOS_MEDIANA[0] else None
+    cap = min(1.0, tope / (eb / rev)) if eb and rev and rev > 0 and eb > 0 else 1.0
+    base = mediano if mediano is not None else c0
+    return {"objetivo": min(cap, base), "mediano": mediano, "tope_conv": cap, "tope_activo": base > cap}
+
+
+
+def _margen_fcf(e: EntradasValoracion, escenario: str = "medio") -> tuple[float | None, float | None, str]:
     """(margen actual, margen objetivo, origen) para el DCF por ingresos."""
-    d = _margen_detalle(e)
+    d = _margen_detalle(e, escenario)
     return d["actual"], d["objetivo"], d["origen"]
 
 
-def multiplo_objetivo(clave: str, e: EntradasValoracion, p: ParametrosValoracion) -> dict:
-    """Multiplo objetivo: el del usuario o la mediana historica propia acotada. {valor|None, origen, n, mediana, tope}."""
+
+def multiplo_objetivo(clave: str, e: EntradasValoracion, p: ParametrosValoracion, escenario: str = "medio") -> dict:
+    """Multiplo objetivo del ``escenario``. {valor|None, origen, n, mediana, rango, tope, ...}.
+
+    Propio = MEDIANA RECORTADA de los multiplos historicos propios (>= ``MIN_PUNTOS_MULTIPLO``), acotada a
+    ``RANGOS_MULTIPLOS``; se mezcla ``PESO_MULTIPLO_PROPIO`` (70 %) propio + 30 % benchmark sectorial (tabla fijada a
+    mano ``BENCHMARK_SECTORIAL``, solo si ``e.sector`` esta en ella) y se acota de nuevo. Pesimista: x (1 - 15 %)
+    (compresion de multiplos). Un multiplo fijado por el usuario reemplaza al propio/sectorial (y tambien se comprime)."""
+    _validar_escenario(escenario)
+    comp = COMPRESION_MULTIPLOS[escenario]
     fijo = _f(getattr(p, f"{clave}_objetivo", None))
     lo, hi = RANGOS_MULTIPLOS[clave]
     if fijo is not None:
-        return {"valor": fijo, "origen": "parametro del usuario", "n": 0, "mediana": None, "rango": (lo, hi), "tope": None}
+        return {"valor": fijo * (1.0 + comp), "valor_sin_compresion": fijo, "origen": "parametro del usuario", "n": 0,
+                "mediana": None, "rango": (lo, hi), "tope": None, "benchmark": None, "compresion": comp}
     pts = [v for v in _limpiar((e.multiplos_hist or {}).get(clave)) if v > 0]
     if len(pts) < MIN_PUNTOS_MULTIPLO:
         return {"valor": None, "origen": "historia insuficiente", "n": len(pts), "mediana": None, "rango": (lo, hi),
-                "tope": None}
-    med = float(np.median(pts))
-    valor = _clip(med, lo, hi)
-    tope = None if valor == med else f"objetivo: mediana histórica {med:.1f}x topada a {valor:g}x"
-    return {"valor": valor, "origen": f"mediana historica propia de {len(pts)} anios, acotada a "
-            f"[{lo:g}, {hi:g}]", "n": len(pts), "mediana": med, "rango": (lo, hi), "tope": tope}
+                "tope": None, "benchmark": None, "compresion": comp}
+    med = mediana_recortada(pts)
+    propio = _clip(med, lo, hi)
+    bm = (BENCHMARK_SECTORIAL.get(e.sector or "") or {}).get(clave)
+    mezcla = PESO_MULTIPLO_PROPIO * propio + (1.0 - PESO_MULTIPLO_PROPIO) * bm if bm is not None else propio
+    base = _clip(mezcla, lo, hi)
+    tope = None if propio == med else f"objetivo: mediana histórica {med:.1f}x topada a {propio:g}x"
+    origen = f"mediana recortada propia de {len(pts)} anios, acotada a [{lo:g}, {hi:g}]"
+    if bm is not None:
+        origen += f"; {PESO_MULTIPLO_PROPIO:.0%} propio + {1 - PESO_MULTIPLO_PROPIO:.0%} sector ({bm:g}x, aprox. a mano {BENCHMARK_FECHA})"
+    return {"valor": base * (1.0 + comp), "valor_sin_compresion": base, "origen": origen, "n": len(pts), "mediana": med,
+            "rango": (lo, hi), "tope": tope, "benchmark": bm, "compresion": comp}
 
 
-def supuestos(entradas: Any, params: Any = None) -> dict:
-    """Todos los supuestos usados (la UI los muestra). Dict plano serializable.
 
-    ``topes_activos`` lista los topes/acotaciones que estan condicionando el resultado ("por construccion")."""
+def supuestos(entradas: Any, params: Any = None, escenario: str = "medio") -> dict:
+    """Todos los supuestos del ``escenario`` (la UI los muestra). Dict plano serializable.
+
+    Son SUPUESTOS DE ESCENARIO, no predicciones. ``topes_activos`` lista los topes/acotaciones que estan condicionando
+    el resultado ("por construccion")."""
+    _validar_escenario(escenario)
     e, p = _como_entradas(entradas), _como_params(params)
-    tasas = calcular_tasas(e, p)
-    g = p.g
+    tasas = calcular_tasas(e, p, escenario)
+    g = tasas["g"]
     out: dict[str, Any] = {
+        "escenario": escenario, "etiqueta": ETIQUETAS_ESCENARIO[escenario],
         "wacc": tasas["wacc"], "wacc_auto": tasas["wacc_auto"], "wacc_origen": tasas["wacc_origen"],
-        "g": g, "margen_seguridad": p.margen_seguridad, "ke": tasas["ke"], "kd": tasas["kd"],
-        "kd_origen": tasas["kd_origen"], "rf": tasas["rf"], "erp": tasas["erp"], "beta": tasas["beta"],
+        "wacc_medio": tasas["wacc_medio"], "g": g, "g_medio": tasas["g_medio"], "margen_seguridad": p.margen_seguridad,
+        "ke": tasas["ke"], "kd": tasas["kd"], "kd_origen": tasas["kd_origen"], "rf": tasas["rf"],
+        "rf_origen": tasas["rf_origen"], "erp": tasas["erp"], "beta": tasas["beta"], "beta_raw": tasas["beta_raw"],
         "beta_origen": tasas["beta_origen"], "tasa_impositiva": tasas["tasa_impositiva"],
         "tasa_origen": tasas["tasa_origen"], "peso_deuda": tasas["peso_deuda"],
-        "horizontes": dict(HORIZONTES), "g_valido": (tasas["wacc"] - g) >= DIF_MIN_WACC_G - 1e-12}
+        "horizontes": dict(HORIZONTES), "etapa1_anios": ANIOS_ETAPA1, "fraccion_crecimiento": FRACCION_CRECIMIENTO,
+        "tope_crecimiento": TOPE_CRECIMIENTO_ETAPA1[escenario], "tope_margen": TOPE_MARGEN[escenario],
+        "compresion_multiplos": COMPRESION_MULTIPLOS[escenario],
+        "g_valido": (tasas["wacc"] - g) >= DIF_MIN_WACC_G_DCF - 1e-12, "dif_min_wacc_g": DIF_MIN_WACC_G_DCF,
+        "avisos": list(tasas["avisos"]), "modo": e.modo, "anios_historia": e.anios_historia}
     topes = list(tasas["topes"])
     ciclicos = []
-    for clave, hist, nombre in (("fcf", e.hist_fcf, "FCF"), ("ebitda", e.hist_ebitda, "EBITDA"),
-                                ("revenue", e.hist_ingresos, "ingresos")):
-        g0, nota = _crecimiento_inicial(hist, g)
-        out[f"crecimiento_inicial_{clave}"] = g0
-        out[f"crecimiento_inicial_{clave}_nota"] = nota
+    for clave, hist, fwd, nombre in (("fcf", e.hist_fcf, e.crec_forward_beneficios, "FCF"),
+                                     ("ebitda", e.hist_ebitda, e.crec_forward_beneficios, "EBITDA"),
+                                     ("revenue", e.hist_ingresos, e.crec_forward_ingresos, "ingresos")):
+        r = crecimiento_etapa1(hist, fwd, g, escenario)
+        out[f"crecimiento_inicial_{clave}"] = r["g1"]
+        out[f"crecimiento_inicial_{clave}_nota"] = r["nota"]
+        out[f"crecimiento_fundamental_{clave}"] = (r["fundamental"] or {}).get("valor")
         if es_ciclico(hist):
             ciclicos.append(nombre)
-        elif _tope_crecimiento(hist):
-            topes.append(f"{nombre}: {_tope_crecimiento(hist)}")
+        elif r["tope"]:
+            topes.append(f"{nombre}: {r['tope']}")
     out["flujos_ciclicos_normalizados"] = ciclicos
-    md = _margen_detalle(e)
+    md = _margen_detalle(e, escenario)
     out.update(margen_fcf_actual=md["actual"], margen_fcf_objetivo=md["objetivo"], margen_fcf_base=md["origen"],
-               margen_fcf_tope=MARGEN_FCF_TOPE, ajuste_fcff=_ajuste_fcff(e, tasas["tasa_impositiva"]))
+               margen_fcf_tope=TOPE_MARGEN[escenario], ajuste_fcff=_ajuste_fcff(e, tasas["tasa_impositiva"]))
     if md["tope_activo"]:
         topes.append(f"margen FCF objetivo: mediana histórica {md['mediano'] * 100:.1f} % topada a "
-                     f"{MARGEN_FCF_TOPE * 100:.0f} %")
-    out["multiplos"] = {k: multiplo_objetivo(k, e, p) for k in RANGOS_MULTIPLOS}
+                     f"{TOPE_MARGEN[escenario] * 100:.0f} %")
+    out["multiplos"] = {k: multiplo_objetivo(k, e, p, escenario) for k in RANGOS_MULTIPLOS}
     for k, nombre in (("pe", "P/E"), ("ev_ebitda", "EV/EBITDA"), ("ev_revenue", "EV/Ingresos"), ("pb", "P/B"),
                       ("p_fcf", "P/FCF")):
         if out["multiplos"][k]["tope"]:
             topes.append(f"{nombre} " + out["multiplos"][k]["tope"])
-    out["crecimiento_eps_lynch"] = cagr(e.hist_eps)
-    if out["crecimiento_eps_lynch"] is not None and out["crecimiento_eps_lynch"] * 100 > LYNCH_CRECIMIENTO_TOPE_PCT:
-        topes.append(f"Lynch: crecimiento de EPS {out['crecimiento_eps_lynch'] * 100:.0f} % topado a "
-                     f"{LYNCH_CRECIMIENTO_TOPE_PCT:.0f} %")
+    cl = _crecimiento_lynch(e, escenario)
+    out["crecimiento_eps_lynch"] = cl[0] / 100.0 if cl else None
+    if cl and cl[2]:
+        topes.append(f"Lynch: crecimiento de EPS {cl[1]:.0f} % topado a {cl[0]:.0f} %")
     out["topes_activos"] = topes
     out["financiera"] = es_financiera(e.sector, e.industria, e.ticker)
     return out
@@ -510,11 +782,24 @@ def _acciones(e: EntradasValoracion) -> tuple[float | None, str | None]:
     return (a, None) if a and a > 0 else (None, "acciones diluidas no disponibles")
 
 
-def _vp_gordon(flujos: list[float], wacc: float, g: float) -> float:
+
+def _valor_flujos(flujos: list[float], wacc: float, g: float) -> float:
+    """Valor presente de los flujos con convencion de MITAD DE ANIO y valor terminal de Gordon.
+
+    ``DF_t = (1+WACC)^-(t-0.5)``. Valor terminal ``TV_N = FCF_N*(1+g)/(WACC-g)``. Como los flujos llegan a mitad de
+    cada anio (N+0.5, N+1.5, ...), el valor en t=N de la perpetuidad es ``TV_N*(1+WACC)^0.5``; descontarlo N anios
+    equivale a descontar ``TV_N`` con el MISMO factor del ultimo flujo explicito, ``DF_N = (1+WACC)^-(N-0.5)``
+    (t = 9.5 con N = 10). Descontarlo a t = N subvaluaria el terminal en un factor (1+WACC)^0.5 (la convencion de t = N
+    solo es coherente con un multiplo de salida, no con Gordon a mitad de anio)."""
     n = len(flujos)
-    vp = sum(f / (1 + wacc) ** (t + 1) for t, f in enumerate(flujos))
-    vt = flujos[-1] * (1 + g) / (wacc - g)
-    return vp + vt / (1 + wacc) ** n
+    vp = sum(f / (1.0 + wacc) ** (t - 0.5) for t, f in enumerate(flujos, 1))
+    vt = flujos[-1] * (1.0 + g) / (wacc - g)
+    return vp + vt / (1.0 + wacc) ** (n - 0.5)
+
+
+def _motivo_dif_dcf(wacc: float, g: float) -> str | None:
+    """Motivo si WACC - g∞ < ``DIF_MIN_WACC_G_DCF`` (2.5 pp): el DCF no aplica."""
+    return _motivo_dif_tasas(wacc, g, "WACC")
 
 
 def _motivo_dif_tasas(tasa: float, g: float, nombre: str) -> str | None:
@@ -522,25 +807,29 @@ def _motivo_dif_tasas(tasa: float, g: float, nombre: str) -> str | None:
     if tasa <= g:
         return f"g ({g * 100:.1f} %) >= {nombre} ({tasa * 100:.1f} %): el valor terminal no converge"
     if round(tasa - g, 10) < DIF_MIN_WACC_G:
-        return (f"diferencia {nombre}-g < {DIF_MIN_WACC_G * 100:.0f} pp ({nombre} {tasa * 100:.2f} %, g {g * 100:.2f} %): "
-                f"el valor terminal explota")
+        return (f"diferencia {nombre}-g < {DIF_MIN_WACC_G * 100:g} pp ({nombre} {tasa * 100:.2f} %, g {g * 100:.2f} %): "
+                f"el valor terminal explota (no aplica)")
     return None
 
 
-def _modelo_dcf(id_: str, base: str, n: int, e: EntradasValoracion, p: ParametrosValoracion, tasas: dict) -> dict:
-    wacc, g = tasas["wacc"], p.g
+def _modelo_dcf(id_: str, base: str, n: int, e: EntradasValoracion, p: ParametrosValoracion, tasas: dict,
+                escenario: str = "medio") -> dict:
+    """DCF explicito de ``n`` anios (10; 5 en la variante corta) en 2 etapas con mitad de anio. Ver el docstring del
+    modulo. ``base``: "fcf" | "ebitda" | "revenue"."""
+    wacc, g = tasas["wacc"], tasas["g"]
     acc, motivo = _acciones(e)
     if motivo:
         return _res(id_, motivo=motivo)
     neto, motivo = _neto(e)
     if motivo:
         return _res(id_, motivo=motivo)
-    motivo = _motivo_dif_tasas(wacc, g, "WACC")
+    motivo = _motivo_dif_dcf(wacc, g)
     if motivo:
         return _res(id_, motivo=motivo)
     t = tasas["tasa_impositiva"]
     topes = list(tasas["topes"])
     ciclico = False
+    fijo = p.crecimiento_inicial if base == "fcf" else None
     if base == "fcf":
         f_ltm = _f(e.fcf_ltm)
         if f_ltm is None:
@@ -550,17 +839,14 @@ def _modelo_dcf(id_: str, base: str, n: int, e: EntradasValoracion, p: Parametro
         hf = _limpiar(e.hist_fcf)
         if hf and sum(1 for v in hf if v > 0) < MIN_ANIOS_FCF:
             return _res(id_, motivo=f"historia insuficiente de FCF positivo (< {MIN_ANIOS_FCF} años con FCF > 0)")
-        f0, g0, ciclico, tope = _base_crecimiento(e.hist_fcf, f_ltm, g)
-        if p.crecimiento_inicial is not None:   # DCF inverso: crecimiento fijado desde fuera
-            g0, ciclico, tope = float(p.crecimiento_inicial), False, None
-            f0 = f_ltm
+        ciclico = fijo is None and es_ciclico(e.hist_fcf)
+        f0 = float(np.mean(hf[-N_NORMALIZACION:])) if ciclico else f_ltm
+        r = crecimiento_etapa1(e.hist_fcf, e.crec_forward_beneficios, g, escenario, fijo)
         if f0 <= 0:
             return _res(id_, motivo="FCF normalizado negativo o cero")
         f0 += _ajuste_fcff(e, t)   # FCFE -> FCFF: se suman los intereses despues de impuestos (la deuda se resta aparte)
-        if tope:
-            topes.append(tope)
         flujos, f = [], f0
-        for gt in np.linspace(g0, g, n):
+        for gt in _trayectoria(r["g1"], g, n):
             f *= 1 + gt
             flujos.append(f)
     elif base == "ebitda":
@@ -574,15 +860,21 @@ def _modelo_dcf(id_: str, base: str, n: int, e: EntradasValoracion, p: Parametro
         da_r, cx_r = _clip(da / eb_ltm, 0.0, 1.0), max(capex, 0.0) / eb_ltm
         nwc = _f(e.nwc_operativo)
         nwc_r = _clip(nwc / eb_ltm, NWC_RATIO_MIN, NWC_RATIO_MAX) if nwc is not None else 0.0
-        eb0, g0, ciclico, tope = _base_crecimiento(e.hist_ebitda, eb_ltm, g)
+        ciclico = es_ciclico(e.hist_ebitda)
+        eb0 = float(np.mean(_limpiar(e.hist_ebitda)[-N_NORMALIZACION:])) if ciclico else eb_ltm
         if eb0 <= 0:
             return _res(id_, motivo="EBITDA normalizado negativo o cero")
-        if tope:
-            topes.append(tope)
+        r = crecimiento_etapa1(e.hist_ebitda, e.crec_forward_beneficios, g, escenario)
+        c_obj = _conversion_ebitda(e, escenario, (1.0 - t) + da_r * t - cx_r)
+        if c_obj["tope_activo"]:
+            topes.append(f"conversión FCF/EBITDA objetivo topada a {c_obj['objetivo'] * 100:.0f} % "
+                         f"(tope de margen {TOPE_MARGEN[escenario] * 100:.0f} % de ingresos)")
         flujos, prev = [], eb0
-        for gt in np.linspace(g0, g, n):
+        for i, gt in enumerate(_trayectoria(r["g1"], g, n), 1):
             eb = prev * (1 + gt)
-            flujos.append(eb * (1 - t) + da_r * eb * t - cx_r * eb - nwc_r * (eb - prev))
+            estructural = eb * (1 - t) + da_r * eb * t - cx_r * eb - nwc_r * (eb - prev)
+            w = 0.0 if i <= ANIOS_ETAPA1 else (i - ANIOS_ETAPA1) / (n - ANIOS_ETAPA1)
+            flujos.append((1 - w) * estructural + w * c_obj["objetivo"] * eb)
             prev = eb
         if flujos[-1] <= 0:
             return _res(id_, motivo="flujo terminal negativo (CapEx/impuestos superan el EBITDA)")
@@ -590,26 +882,29 @@ def _modelo_dcf(id_: str, base: str, n: int, e: EntradasValoracion, p: Parametro
         rev_ltm = _f(e.ingresos_ltm)
         if rev_ltm is None or rev_ltm <= 0:
             return _res(id_, motivo="ingresos no disponibles")
-        md = _margen_detalle(e)
+        md = _margen_detalle(e, escenario)
         m_act, m_obj = md["actual"], md["objetivo"]
         if m_act is None or m_obj is None:
             return _res(id_, motivo="margen FCF/operativo no disponible")
         if m_obj <= 0:
             return _res(id_, motivo="margen FCF historico no positivo")
-        rev0, g0, ciclico, tope = _base_crecimiento(e.hist_ingresos, rev_ltm, g)
-        if tope:
-            topes.append(tope)
+        ciclico = es_ciclico(e.hist_ingresos)
+        rev0 = float(np.mean(_limpiar(e.hist_ingresos)[-N_NORMALIZACION:])) if ciclico else rev_ltm
+        r = crecimiento_etapa1(e.hist_ingresos, e.crec_forward_ingresos, g, escenario)
         if md["tope_activo"]:
             topes.append(f"margen FCF objetivo: mediana histórica {md['mediano'] * 100:.1f} % topada a "
-                         f"{MARGEN_FCF_TOPE * 100:.0f} %")
+                         f"{TOPE_MARGEN[escenario] * 100:.0f} %")
         flujos, rev = [], rev0
-        for i, gt in enumerate(np.linspace(g0, g, n), 1):
+        for i, gt in enumerate(_trayectoria(r["g1"], g, n), 1):
             rev *= 1 + gt
-            flujos.append(rev * (m_act + (m_obj - m_act) * i / n))
+            flujos.append(rev * _convergencia(m_act, m_obj, i, n))
         if flujos[-1] <= 0:
             return _res(id_, motivo="flujo terminal negativo")
-    valor = (_vp_gordon(flujos, wacc, g) + neto) / acc  # type: ignore[operator]
-    return _res(id_, valor, wacc=wacc, g=g, ciclico=ciclico, topes=topes)
+    if r["tope"]:
+        topes.append(r["tope"])
+    valor = (_valor_flujos(flujos, wacc, g) + neto) / acc  # type: ignore[operator]
+    return _res(id_, valor, wacc=wacc, g=g, g1=r["g1"], horizonte=n, ciclico=ciclico, topes=topes,
+                crecimiento_nota=r["nota"])
 
 
 def _motivo_inconsistente(e: EntradasValoracion, *campos: str) -> str | None:
@@ -618,11 +913,13 @@ def _motivo_inconsistente(e: EntradasValoracion, *campos: str) -> str | None:
         else None
 
 
-def _modelo_multiplo(id_: str, clave: str, e: EntradasValoracion, p: ParametrosValoracion) -> dict:
+
+def _modelo_multiplo(id_: str, clave: str, e: EntradasValoracion, p: ParametrosValoracion,
+                     escenario: str = "medio") -> dict:
     inc = _motivo_inconsistente(e, *{"pe": ("eps_ltm",), "pb": ("bvps",)}.get(clave, ()))
     if inc:
         return _res(id_, motivo=inc)
-    mo = multiplo_objetivo(clave, e, p)
+    mo = multiplo_objetivo(clave, e, p, escenario)
     if mo["valor"] is None:
         return _res(id_, motivo=f"historia insuficiente para el multiplo objetivo (< {MIN_PUNTOS_MULTIPLO} anios)")
     m = mo["valor"]
@@ -670,6 +967,7 @@ def _modelo_multiplo(id_: str, clave: str, e: EntradasValoracion, p: ParametrosV
     return _res(id_, (rev * m + neto) / acc, **extra)  # type: ignore[operator]
 
 
+
 def _modelo_ddm(e: EntradasValoracion, p: ParametrosValoracion, tasas: dict) -> dict:
     d0 = _f(e.dividendo_anual)
     if d0 is None:
@@ -680,7 +978,7 @@ def _modelo_ddm(e: EntradasValoracion, p: ParametrosValoracion, tasas: dict) -> 
     if px and px > 0 and d0 / px < DDM_RENDIMIENTO_MIN:
         return _res("ddm", motivo=f"dividendo simbólico (rendimiento {d0 / px * 100:.1f} % < "
                                   f"{DDM_RENDIMIENTO_MIN * 100:.0f} %): el DDM subestimaría el valor")
-    ke, g = tasas["ke"], p.g
+    ke, g = tasas["ke"], tasas["g"]
     if ke <= g:
         return _res("ddm", motivo=f"ke ({ke * 100:.1f} %) <= g ({g * 100:.1f} %): el modelo de Gordon no converge")
     motivo = _motivo_dif_tasas(ke, g, "ke")
@@ -689,7 +987,22 @@ def _modelo_ddm(e: EntradasValoracion, p: ParametrosValoracion, tasas: dict) -> 
     return _res("ddm", d0 * (1 + g) / (ke - g), ke=ke, g=g, topes=tasas["topes_ke"])
 
 
-def _modelo_epv(e: EntradasValoracion, p: ParametrosValoracion, tasas: dict) -> dict:
+
+def _crecimiento_ingresos_anual(e: EntradasValoracion) -> float | None:
+    """Crecimiento anual de ingresos: YoY del LTM (historia XBRL); sin historia, el forward de yfinance."""
+    m = momentum_yoy(e.hist_ingresos)
+    if m is not None:
+        h = _limpiar(e.hist_ingresos)
+        return h[-1] / h[-2] - 1.0     # sin recortar: el umbral del 20 % se compara con el crecimiento real
+    return _f(e.crec_forward_ingresos)
+
+
+def _modelo_epv(e: EntradasValoracion, p: ParametrosValoracion, tasas: dict, escenario: str = "medio") -> dict:
+    if escenario == "medio":
+        cr = _crecimiento_ingresos_anual(e)
+        if cr is not None and cr > EPV_CRECIMIENTO_MAX:
+            return _res("epv", motivo=f"crecimiento de ingresos {cr * 100:.0f} % > {EPV_CRECIMIENTO_MAX * 100:.0f} %: el EPV "
+                                      f"(crecimiento cero) no es informativo en el escenario Medio")
     ebit = _f(e.ebit_ltm)
     if ebit is None:
         return _res("epv", motivo="resultado operativo (EBIT) no disponible")
@@ -704,7 +1017,7 @@ def _modelo_epv(e: EntradasValoracion, p: ParametrosValoracion, tasas: dict) -> 
     wacc = tasas["wacc"]
     if wacc <= 0:
         return _res("epv", motivo="WACC no positivo")
-    motivo = _motivo_dif_tasas(wacc, p.g, "WACC")
+    motivo = _motivo_dif_tasas(wacc, tasas["g"], "WACC")
     if motivo:
         return _res("epv", motivo=motivo)
     nopat = ebit * (1 - tasas["tasa_impositiva"])
@@ -732,7 +1045,19 @@ def _modelo_graham(e: EntradasValoracion) -> dict:
     return _res("graham", math.sqrt(GRAHAM_FACTOR * eps * bv))
 
 
-def _modelo_lynch(e: EntradasValoracion) -> dict:
+
+def _crecimiento_lynch(e: EntradasValoracion, escenario: str = "medio") -> tuple[float, float, bool] | None:
+    """(crecimiento % usado, crecimiento % bruto, topado) de EPS para Lynch, o None. Bruto = crecimiento fundamental
+    (CAGR winsorizado + momentum + forward) de EPS; el tope es 25 % (Medio) / 15 % (Pesimista)."""
+    c = crecimiento_fundamental(e.hist_eps, e.crec_forward_beneficios)["valor"]
+    if c is None:
+        return None
+    bruto = c * 100.0
+    usado = min(LYNCH_TOPE_PCT_ESC[escenario], bruto)
+    return usado, bruto, bruto > usado
+
+
+def _modelo_lynch(e: EntradasValoracion, escenario: str = "medio") -> dict:
     inc = _motivo_inconsistente(e, "eps_ltm")
     if inc:
         return _res("lynch", motivo=inc)
@@ -741,23 +1066,26 @@ def _modelo_lynch(e: EntradasValoracion) -> dict:
         return _res("lynch", motivo="EPS no disponible")
     if eps <= 0:
         return _res("lynch", motivo="EPS LTM negativo o cero")
-    c = cagr(e.hist_eps)
-    if c is None:
+    cl = _crecimiento_lynch(e, escenario)
+    if cl is None:
         return _res("lynch", motivo="crecimiento historico de EPS no disponible")
-    if c <= 0:
+    crec, bruto, topado = cl
+    if bruto <= 0:
         return _res("lynch", motivo="crecimiento de EPS <= 0")
-    crec = min(LYNCH_CRECIMIENTO_TOPE_PCT, c * 100.0)
-    topes = [f"crecimiento de EPS {c * 100:.0f} % topado a {LYNCH_CRECIMIENTO_TOPE_PCT:.0f} %"] if c * 100.0 > crec else []
+    topes = [f"crecimiento de EPS {bruto:.0f} % topado a {crec:.0f} %"] if topado else []
     return _res("lynch", eps * crec, crecimiento_pct=crec, topes=topes)
 
 
-def calcular_modelos(entradas: Any, params: Any = None) -> list[dict]:
-    """Los 15 modelos (en el orden de ``MODELOS``). Funcion pura; nunca lanza por datos faltantes.
+
+def calcular_modelos(entradas: Any, params: Any = None, escenario: str = "medio") -> list[dict]:
+    """Los 15 modelos (en el orden de ``MODELOS``) del ``escenario`` ("medio" por defecto o "pesimista"). Funcion pura;
+    nunca lanza por datos faltantes.
 
     Cada dict: id, nombre, familia, precio_estimado (float|None), aplicable, motivo_exclusion (+ datos del modelo).
-    """
+    Los ids ``dcf_5y_*`` son la variante corta (mismo motor, valor terminal en el anio 5); ``dcf_10y_*`` el motor completo."""
+    _validar_escenario(escenario)
     e, p = _como_entradas(entradas), _como_params(params)
-    tasas = calcular_tasas(e, p)
+    tasas = calcular_tasas(e, p, escenario)
     financiera = es_financiera(e.sector, e.industria, e.ticker)
     out: list[dict] = []
     for id_, _, _ in MODELOS:
@@ -769,17 +1097,17 @@ def calcular_modelos(entradas: Any, params: Any = None) -> list[dict]:
                 warnings.simplefilter("ignore")
                 if id_.startswith("dcf_"):
                     _, anios, base = id_.split("_")
-                    r = _modelo_dcf(id_, base, HORIZONTES[anios], e, p, tasas)
+                    r = _modelo_dcf(id_, base, HORIZONTES[anios], e, p, tasas, escenario)
                 elif id_ in ("pe", "ev_ebitda", "ev_revenue", "pb", "p_fcf"):
-                    r = _modelo_multiplo(id_, id_, e, p)
+                    r = _modelo_multiplo(id_, id_, e, p, escenario)
                 elif id_ == "ddm":
                     r = _modelo_ddm(e, p, tasas)
                 elif id_ == "epv":
-                    r = _modelo_epv(e, p, tasas)
+                    r = _modelo_epv(e, p, tasas, escenario)
                 elif id_ == "graham":
                     r = _modelo_graham(e)
                 else:
-                    r = _modelo_lynch(e)
+                    r = _modelo_lynch(e, escenario)
         except Exception as ex:  # noqa: BLE001  (un modelo roto no tumba al resto)
             r = _res(id_, motivo=f"error de calculo: {type(ex).__name__}")
         if e.moneda_conflicto and not r["aplicable"] and any(
@@ -802,19 +1130,22 @@ def clasificar_incertidumbre(cv: float | None, n_usados: int, n_grupos: int | No
     return "Media"
 
 
+
 def agregar_valor_justo(resultados_modelos: list[dict], modelos_activos: list[str] | None = None,
                         margen_seguridad: float = MARGEN_SEGURIDAD_DEFECTO,
                         precio_actual: float | None = None) -> dict:
     """Consolida los modelos en un unico valor justo (funcion pura, sin red).
 
-    ``modelos_activos`` None = todos; lista vacia = ninguno. Ver el docstring del modulo para la logica exacta.
-    ``n_validos`` cuenta los validos (activos, aplicables y > 0) ANTES del filtro IQR; ``modelos_usados`` son los que
-    quedan tras excluir outliers y ``incertidumbre`` usa ``len(modelos_usados)`` (CV poblacional de los usados).
-    ``modelos_no_aplicables`` = ids sin precio valido; ``modelos_desactivados`` = ids aplicables que el usuario no
-    incluyo (un id nunca esta en ambas listas: "no aplica" prevalece). ``cv_prefiltro`` = CV de los validos antes del
-    IQR; ``familias_usadas`` = grupos de familia (``GRUPOS_FAMILIA``) de los modelos usados.
-    El ``margen_seguridad`` se acota a [MARGEN_SEGURIDAD_MIN, MARGEN_SEGURIDAD_MAX].
-    """
+    Pasos: filtra por ``modelos_activos`` (None = todos; lista vacia = ninguno) -> descarta no aplicables o precio <= 0
+    -> con >= ``MIN_MODELOS_IQR`` validos excluye outliers (IQR) -> ``fair_value`` = PROMEDIO IGUALANDO FAMILIAS:
+    media de cada grupo (DCF / Multiplos / Valor-Dividendos) y media de esas medias, es decir 1/3 cada una; si un
+    grupo no tiene modelos usados se renormaliza entre los restantes (``pesos_familias``). Si algun modelo no trae
+    ``familia`` no se puede igualar y se usa el promedio simple (``metodo`` lo dice).
+    Informacion complementaria (mismos modelos usados): ``promedio_simple``, ``mediana``, ``submedias``, ``cv`` y
+    ``incertidumbre`` (CV poblacional de los modelos usados + regla de degradacion por familias).
+    ``n_validos`` cuenta los validos ANTES del IQR; ``modelos_no_aplicables`` = ids sin precio valido;
+    ``modelos_desactivados`` = ids aplicables que el usuario no incluyo (un id nunca esta en ambas listas).
+    El ``margen_seguridad`` se acota a [MARGEN_SEGURIDAD_MIN, MARGEN_SEGURIDAD_MAX]."""
     margen_seguridad = _clip(_f(margen_seguridad) if _f(margen_seguridad) is not None else MARGEN_SEGURIDAD_DEFECTO,
                              MARGEN_SEGURIDAD_MIN, MARGEN_SEGURIDAD_MAX)
     resultados = list(resultados_modelos or [])
@@ -850,7 +1181,8 @@ def agregar_valor_justo(resultados_modelos: list[dict], modelos_activos: list[st
             "modelos_usados": list(usados), "familias_usadas": familias,
             "modelos_outlier": outliers, "modelos_desactivados": desactivados,
             "modelos_no_aplicables": no_aplicables, "margen_seguridad": margen_seguridad,
-            "precio_actual": _f(precio_actual), "motivo": None, "rango": None}
+            "precio_actual": _f(precio_actual), "motivo": None, "rango": None, "metodo": None,
+            "promedio_simple": None, "mediana": None, "submedias": {}, "pesos_familias": {}}
     if not usados:
         sin_activos = activos is not None and not any(r["id"] in activos for r in resultados)
         base["motivo"] = ("ningún modelo activo" if sin_activos
@@ -858,20 +1190,33 @@ def agregar_valor_justo(resultados_modelos: list[dict], modelos_activos: list[st
         return base
     v = np.array(list(usados.values()), dtype=float)
     mu = float(v.mean())
-    fv, sigma = mu, float(v.std(ddof=0))
+    sigma = float(v.std(ddof=0))
     cv = sigma / mu if mu > 0 else None
     px = _f(precio_actual)
     n_grupos = len(familias) if familias else None
-    base.update(fair_value=fv, cv=cv, incertidumbre=clasificar_incertidumbre(cv, len(usados), n_grupos),
-                margin_of_safety_price=fv * (1.0 - margen_seguridad), rango=(float(v.min()), float(v.max())),
-                upside_pct=(fv - px) / px * 100.0 if px is not None and px > 0 else None)
+    if familias:
+        por_grupo: dict[str, list[float]] = {}
+        for k, val in usados.items():
+            por_grupo.setdefault(GRUPOS_FAMILIA.get(fam_de[k], fam_de[k]), []).append(val)
+        sub = {g: float(np.mean(por_grupo[g])) for g in GRUPOS if g in por_grupo}
+        fv_ = float(np.mean(list(sub.values())))
+        base.update(metodo="igualacion_familias", submedias=sub, pesos_familias={g: 1.0 / len(sub) for g in sub})
+    else:
+        fv_ = mu
+        base.update(metodo="promedio_simple")
+    base.update(fair_value=fv_, cv=cv, incertidumbre=clasificar_incertidumbre(cv, len(usados), n_grupos),
+                promedio_simple=mu, mediana=float(np.median(v)),
+                margin_of_safety_price=fv_ * (1.0 - margen_seguridad), rango=(float(v.min()), float(v.max())),
+                upside_pct=(fv_ - px) / px * 100.0 if px is not None and px > 0 else None)
     return base
 
 
+
 def complementarias(agregado: dict, modelos: list[dict] | None = None) -> dict | None:
-    """Estadisticas INFORMATIVAS (no sustituyen al consolidado): mediana, submedias por grupo de familia y promedio
-    igualando grupos (cada grupo pesa lo mismo). Los modelos no son independientes: 6 DCF comparten WACC/g/crecimiento y los
-    de Valor comparten EPS y valor contable, asi que N modelos no son N confirmaciones. None sin modelos usados."""
+    """Estadisticas INFORMATIVAS: promedio simple, mediana, submedias por grupo de familia y promedio igualando grupos
+    (que desde el motor de escenarios es el propio ``fair_value`` cuando hay familias). Los modelos no son independientes:
+    6 DCF comparten WACC/g/crecimiento y los de Valor comparten EPS y valor contable, asi que N modelos no son N
+    confirmaciones. None sin modelos usados."""
     modelos = modelos if modelos is not None else (agregado or {}).get("modelos") or []
     usados = set((agregado or {}).get("modelos_usados") or [])
     por_grupo: dict[str, list[float]] = {}
@@ -886,14 +1231,17 @@ def complementarias(agregado: dict, modelos: list[dict] | None = None) -> dict |
     prom_fam = float(np.mean(list(sub.values())))
     px = _f((agregado or {}).get("precio_actual"))
     up = (lambda x: (x - px) / px * 100.0 if px and px > 0 else None)  # noqa: E731
-    return {"mediana": float(np.median(todos)), "submedias": sub, "n_por_grupo": {g: len(por_grupo[g]) for g in sub},
-            "promedio_familias": prom_fam, "upside_mediana": up(float(np.median(todos))),
+    simple = float(np.mean(todos))
+    return {"mediana": float(np.median(todos)), "promedio_simple": simple, "submedias": sub,
+            "n_por_grupo": {g: len(por_grupo[g]) for g in sub}, "promedio_familias": prom_fam,
+            "upside_mediana": up(float(np.median(todos))), "upside_promedio_simple": up(simple),
             "upside_promedio_familias": up(prom_fam)}
+
 
 
 def _valor_dcf(e: EntradasValoracion, p: ParametrosValoracion, id_: str) -> float | None:
     _, anios, base = id_.split("_")
-    r = _modelo_dcf(id_, base, HORIZONTES[anios], e, p, calcular_tasas(e, p))
+    r = _modelo_dcf(id_, base, HORIZONTES[anios], e, p, calcular_tasas(e, p, "medio"), "medio")
     return r["precio_estimado"] if r["aplicable"] else None
 
 
@@ -917,12 +1265,14 @@ def _biseccion(f, lo: float, hi: float, objetivo: float, creciente: bool, it: in
     return (lo + hi) / 2
 
 
-def dcf_inverso(entradas: Any, params: Any = None, precio: float | None = None, modelo: str = "dcf_10y_fcf") -> dict:
-    """DCF inverso (funcion pura): WACC y crecimiento inicial que igualan el ``modelo`` DCF al precio.
 
-    ``wacc_implicito``: el WACC (con g y crecimiento usados) que da exactamente el precio; ``g0_implicito``: el
-    crecimiento inicial (con el WACC usado) que lo da. Cada uno es None si no existe en su rango (WACC en
-    [g + ``DIF_MIN_WACC_G``, 40 %]; crecimiento en [-20 %, 60 %]) o si el modelo no aplica. Lectura: si el WACC
+def dcf_inverso(entradas: Any, params: Any = None, precio: float | None = None, modelo: str = "dcf_10y_fcf") -> dict:
+    """DCF inverso (funcion pura, escenario Medio): WACC y crecimiento de la etapa 1 que igualan el ``modelo`` DCF al
+    precio.
+
+    ``wacc_implicito``: el WACC (con g∞ y crecimiento usados) que da exactamente el precio; ``g0_implicito``: el
+    crecimiento de la etapa 1 (sin tope; con el WACC usado) que lo da. Cada uno es None si no existe en su rango (WACC en
+    [g∞ + ``DIF_MIN_WACC_G_DCF``, 40 %]; crecimiento en [-20 %, 60 %]) o si el modelo no aplica. Lectura: si el WACC
     implicito es menor o el crecimiento implicito mayor que los usados, el mercado descuenta menos riesgo o mas
     crecimiento que estos supuestos."""
     e, p = _como_entradas(entradas), _como_params(params)
@@ -932,27 +1282,74 @@ def dcf_inverso(entradas: Any, params: Any = None, precio: float | None = None, 
     if not px or px <= 0 or modelo not in IDS_MODELOS or not modelo.startswith("dcf_") or modelo.endswith("revenue") \
             or modelo.endswith("ebitda"):
         return out
-    tasas = calcular_tasas(e, p)
+    tasas = calcular_tasas(e, p, "medio")
     out["wacc_usado"] = tasas["wacc"]
     out["valor_con_supuestos"] = _valor_dcf(e, p, modelo)
-    g0u = _base_crecimiento(e.hist_fcf, _f(e.fcf_ltm) or 0.0, p.g)[1]
+    g0u = crecimiento_etapa1(e.hist_fcf, e.crec_forward_beneficios, tasas["g"], "medio")["g1"]
     out["g0_usado"] = p.crecimiento_inicial if p.crecimiento_inicial is not None else g0u
-    out["wacc_implicito"] = _biseccion(lambda w: _valor_dcf(e, p.con(wacc=w), modelo), p.g + DIF_MIN_WACC_G, 0.40, px,
-                                       creciente=False)
+    out["wacc_implicito"] = _biseccion(lambda w: _valor_dcf(e, p.con(wacc=w), modelo), tasas["g"] + DIF_MIN_WACC_G_DCF, 0.40,
+                                       px, creciente=False)
     out["g0_implicito"] = _biseccion(lambda g0: _valor_dcf(e, p.con(crecimiento_inicial=g0), modelo), -0.20, 0.60, px,
                                      creciente=True)
     return out
 
 
+
 def valor_justo(entradas: Any, params: Any = None, modelos_activos: list[str] | None = None,
-                precio_actual: float | None = None) -> dict:
-    """Atajo: ``calcular_modelos`` + ``agregar_valor_justo`` con el margen de seguridad de ``params``."""
+                precio_actual: float | None = None, escenario: str = "medio") -> dict:
+    """Atajo: ``calcular_modelos`` + ``agregar_valor_justo`` (escenario Medio por defecto) con el margen de ``params``."""
     e, p = _como_entradas(entradas), _como_params(params)
     px = precio_actual if precio_actual is not None else e.precio
-    modelos = calcular_modelos(e, p)
+    modelos = calcular_modelos(e, p, escenario)
     agg = agregar_valor_justo(modelos, modelos_activos, p.margen_seguridad, px)
     agg["modelos"] = modelos
     return agg
+
+
+AVISO_ESCENARIOS = ("Los escenarios Medio y Pesimista son SUPUESTOS DE ESCENARIO (tasas, crecimientos, topes y "
+                    "compresión de múltiplos fijados de antemano), no predicciones. Solo existen estos dos.")
+
+
+def calcular_escenarios(entradas: Any, params: Any = None, modelos_activos: list[str] | None = None,
+                        margen_seguridad: float | None = None, precio_actual: float | None = None) -> dict:
+    """Valor justo en los dos escenarios (funcion pura y sin red: recalcular con otros WACC/g/sliders es instantaneo).
+
+    Devuelve ``{"medio": agg, "pesimista": agg, "modelos": [...], "supuestos": {...}, "escenarios": ("medio",
+    "pesimista"), "aviso": str}``. Cada ``agg`` es el de ``agregar_valor_justo`` (+ ``modelos`` y ``complementarias``).
+    ``modelos`` trae por modelo: id, nombre, familia, ``aplicable`` (en algun escenario), ``motivo``, ``precio_medio``,
+    ``precio_pesimista``, ``aplicable_medio/_pesimista``, ``motivo_medio/_pesimista``, ``topes_medio/_pesimista``,
+    ``activo``. ``supuestos`` = {"medio": ..., "pesimista": ..., "avisos": [...], "nota": ...}. Los sliders del usuario
+    (``params``: wacc, g, rf, erp, multiplos objetivo) sobreescriben el Medio; el Pesimista se deriva del Medio vigente.
+    ``margen_seguridad`` None => ``params.margen_seguridad`` (0.25 por defecto)."""
+    e, p = _como_entradas(entradas), _como_params(params)
+    mos = margen_seguridad if margen_seguridad is not None else p.margen_seguridad
+    px = precio_actual if precio_actual is not None else e.precio
+    ms = {esc: calcular_modelos(e, p, esc) for esc in ESCENARIOS}
+    out: dict[str, Any] = {}
+    for esc in ESCENARIOS:
+        agg = agregar_valor_justo(ms[esc], modelos_activos, mos, px)
+        agg["modelos"] = ms[esc]
+        agg["complementarias"] = complementarias(agg, ms[esc])
+        agg["escenario"] = esc
+        out[esc] = agg
+    activos = None if modelos_activos is None else set(modelos_activos)
+    modelos = []
+    for m, q in zip(ms["medio"], ms["pesimista"]):
+        modelos.append({"id": m["id"], "nombre": m["nombre"], "familia": m["familia"],
+                        "aplicable": bool(m["aplicable"] or q["aplicable"]),
+                        "motivo": m["motivo_exclusion"] or q["motivo_exclusion"],
+                        "aplicable_medio": m["aplicable"], "aplicable_pesimista": q["aplicable"],
+                        "motivo_medio": m["motivo_exclusion"], "motivo_pesimista": q["motivo_exclusion"],
+                        "precio_medio": m["precio_estimado"], "precio_pesimista": q["precio_estimado"],
+                        "topes_medio": m["topes"], "topes_pesimista": q["topes"],
+                        "activo": activos is None or m["id"] in activos})
+    sup = {esc: supuestos(e, p, esc) for esc in ESCENARIOS}
+    out["modelos"] = modelos
+    out["supuestos"] = {**sup, "avisos": list(sup["medio"]["avisos"]), "nota": AVISO_ESCENARIOS,
+                        "modo": e.modo, "anios_historia": e.anios_historia}
+    out["escenarios"] = ESCENARIOS
+    out["aviso"] = AVISO_ESCENARIOS
+    return out
 
 
 # --- Extraccion de entradas (reutiliza los helpers XBRL de valuation_floors) ----------------------------------
@@ -998,7 +1395,28 @@ def _flujo(facts, conceptos, splits=None, ajusta=False) -> pd.Series:
     for c in reversed(conceptos):
         s = vf._flujo_trimestral(facts, c, splits, ajusta)
         out.update(s.to_dict())
-    return pd.Series(out, dtype=float).sort_index() if out else pd.Series(dtype=float)
+    return _corregir_q4_anual(pd.Series(out, dtype=float).sort_index()) if out else pd.Series(dtype=float)
+
+
+def _corregir_q4_anual(q: pd.Series) -> pd.Series:
+    """Corrige un "trimestre" que en realidad es el ANUAL sin diferenciar (el helper de valuation_floors deja Q4 = FY cuando
+    falta el acumulado de 9 meses; p. ej. MSFT 2016-06: OCF 33.3 B en un trimestre). Si un valor excede 2.5x la mediana de
+    sus vecinos y ``valor - suma de los 3 trimestres previos`` cae entre 0.3x y 3x esa mediana, se reemplaza por esa
+    diferencia (la resta que faltaba). Sin ese ajuste, un TTM con un anio incluido de mas distorsiona FCF/EBITDA historicos."""
+    if len(q) < 6:
+        return q
+    v = q.to_numpy(dtype=float).copy()
+    for i in range(3, len(v)):
+        vec = [v[j] for j in range(max(0, i - 4), min(len(v), i + 5)) if j != i]
+        pos = [x for x in vec if x > 0]
+        if len(pos) < 4 or v[i] <= 0:
+            continue
+        med = float(np.median(pos))
+        if v[i] > 2.5 * med:
+            d = v[i] - v[i - 3:i].sum()
+            if 0.3 * med <= d <= 3.0 * med:
+                v[i] = d
+    return pd.Series(v, index=q.index)
 
 
 def _instante(facts, conceptos) -> pd.Series:
@@ -1149,10 +1567,12 @@ def _precio_sin_ajuste_dividendos(df: pd.DataFrame) -> pd.Series:
     return pd.Series(adj / F, index=close.index)
 
 
-def _instantaneas_multiplos(precio_raw: pd.Series, eps_q, fcf_q, ebitda_q, rev_q, sh_q, caja, deuda, equity) -> dict:
-    """Multiplos propios en k = 1..ANIOS_HISTORIA anios atras (precio 45 dias despues del cierre del periodo)."""
+
+def _instantaneas_multiplos(precio_raw: pd.Series, eps_q, fcf_q, ebitda_q, rev_q, sh_q, caja, deuda, equity,
+                            k_max: int = ANIOS_HISTORIA) -> dict:
+    """Multiplos propios en k = 1..``k_max`` anios atras (precio 45 dias despues del cierre del periodo)."""
     out: dict[str, list[float]] = {k: [] for k in RANGOS_MULTIPLOS}
-    for k in range(ANIOS_HISTORIA, 0, -1):
+    for k in range(k_max, 0, -1):
         def px_en(fecha):
             f = fecha + pd.Timedelta(days=REZAGO_PUBLICACION_DIAS)
             s = precio_raw[precio_raw.index <= f]
@@ -1185,16 +1605,231 @@ def _instantaneas_multiplos(precio_raw: pd.Series, eps_q, fcf_q, ebitda_q, rev_q
     return out
 
 
-def extraer_entradas(ticker: str, tk_obj: Any, df: pd.DataFrame, info: dict | None = None,
-                     facts: pd.DataFrame | None = None) -> EntradasValoracion:
-    """Arma las entradas UNA vez (sin peticiones a yfinance; EDGAR solo si no se pasa ``facts``).
+# --- Series multi-anio -----------------------------------------------------------------------------------------
+_NETO = ["us-gaap:NetIncomeLoss", "us-gaap:ProfitLoss", "us-gaap:NetIncomeLossAvailableToCommonStockholdersBasic"]
+_DIVIDENDOS = ["us-gaap:PaymentsOfDividends", "us-gaap:PaymentsOfDividendsCommonStock"]
 
+
+def _ttm_rolling(q: pd.Series) -> pd.Series:
+    """TTM (suma de 4 trimestres CONSECUTIVOS, 60-130 dias entre cierres) indexado por el cierre del ultimo trimestre."""
+    if q is None or len(q) < 4:
+        return pd.Series(dtype=float)
+    idx, vals = q.index, q.to_numpy(dtype=float)
+    out = {}
+    for i in range(3, len(q)):
+        d = np.diff(idx[i - 3:i + 1].values).astype("timedelta64[D]").astype(int)
+        if ((d >= 60) & (d <= 130)).all():
+            out[idx[i]] = float(vals[i - 3:i + 1].sum())
+    return pd.Series(out, dtype=float).sort_index()
+
+
+def _valor_en(ttm: pd.Series, fecha: pd.Timestamp, tol: int = 10) -> float | None:
+    """Valor del TTM cuyo cierre coincide con ``fecha`` (+-``tol`` dias); None si no hay."""
+    if ttm is None or ttm.empty:
+        return None
+    i = ttm.index.searchsorted(fecha)
+    for j in (i - 1, i):
+        if 0 <= j < len(ttm) and abs((ttm.index[j] - fecha).days) <= tol:
+            return float(ttm.iloc[j])
+    return None
+
+
+def _historia_fechas(q: pd.Series, n: int) -> tuple[list[float], list[pd.Timestamp]]:
+    """Como ``_historia`` pero devolviendo tambien las fechas de cierre (de mas antiguo a mas reciente)."""
+    vals, fechas = [], []
+    for k in range(n):
+        a = _anual(q, k)
+        if a is None:
+            break
+        vals.append(a[0])
+        fechas.append(a[1])
+    return vals[::-1], fechas[::-1]
+
+
+def _depurar_acciones(s: pd.Series) -> pd.Series:
+    """Corrige glitches puntuales de la serie de acciones (p. ej. un trimestre sin ajustar por un split): un valor que se
+    desvia > ``SALTO_ACCIONES`` de sus dos vecinas, que a su vez coinciden entre si (+-15 %), se sustituye por su media."""
+    if s is None or len(s) < 3:
+        return s
+    v = s.to_numpy(dtype=float).copy()
+    # 1) ESCALA: emisores que en algunos periodos reportan en miles/millones (KO 2017-18: 4334 en vez de 4.334e9). Un valor
+    #    a >50x de la mediana de la serie se reescala por 10^(+-3k) si asi cae a menos de 5x de ella.
+    med = float(np.median(v[v > 0])) if (v > 0).any() else 0.0
+    if med > 0:
+        for i, x in enumerate(v):
+            if x > 0 and (x < med / 50.0 or x > med * 50.0):
+                for k in (3, -3, 6, -6, 9, -9):
+                    y = x * 10.0 ** k
+                    if med / 5.0 <= y <= med * 5.0:
+                        v[i] = y
+                        break
+    for i in range(1, len(v) - 1):
+        a, b, c = v[i - 1], v[i], v[i + 1]
+        if a > 0 and c > 0 and abs(a / c - 1.0) < 0.15 and abs(b / ((a + c) / 2.0) - 1.0) > SALTO_ACCIONES:
+            v[i] = (a + c) / 2.0
+    return pd.Series(v, index=s.index)
+
+
+def _construir_serie_ttm(series: dict[str, pd.Series], saldos: dict[str, pd.Series]) -> list[dict]:
+    """Una fila por cierre trimestral con TTM de cada flujo y saldos puntuales (para la serie historica del valor justo)."""
+    ttms = {k: _ttm_rolling(q) for k, q in series.items()}
+    fechas = sorted(set().union(*[set(t.index) for k, t in ttms.items() if k in ("ing", "ocf", "eps", "ebit")]))
+    filas = []
+    for d in fechas:
+        fila: dict[str, Any] = {"fecha": str(d.date())}
+        for k, t in ttms.items():
+            v = _valor_en(t, d, 0)
+            fila[k] = v
+        for k, s in saldos.items():
+            fila[k] = _asof(s, d, 150)
+        filas.append(fila)
+    return filas
+
+
+# --- Modo local / nube, Rf (^TNX) y cache ---------------------------------------------------------------------------
+def modo_por_defecto() -> str:
+    """"nube" si hay variable PORT (Render y similares); si no, "local"."""
+    from src.reporting import userdata
+    return "nube" if userdata.en_nube() else "local"
+
+
+def anios_para_modo(modo: str) -> int:
+    """Anios fiscales de historia: ``ANIOS_LOCAL`` (10) en local sin recortes; ``ANIOS_NUBE`` (3) en el visor ligero."""
+    return ANIOS_NUBE if modo == "nube" else ANIOS_LOCAL
+
+
+def _resolver_modo(modo: str | None, anios: int | None) -> tuple[str, int]:
+    m = modo if modo in ("local", "nube") else modo_por_defecto()
+    a = int(anios) if anios else anios_para_modo(m)
+    return m, max(1, min(a, 15))
+
+
+def normalizar_tnx(valor: Any) -> float | None:
+    """Rendimiento de ^TNX como FRACCION. yfinance lo da en puntos porcentuales (4.25 = 4.25 %): se divide /100. Valida
+    el rango ``RF_RANGO_PCT`` (0.5 %-12 %); fuera de el devuelve None. Un valor < 0.2 se interpreta como fraccion."""
+    v = _f(valor)
+    if v is None or v <= 0:
+        return None
+    pct = v * 100.0 if v < 0.2 else v
+    if not RF_RANGO_PCT[0] <= pct <= RF_RANGO_PCT[1]:
+        return None
+    return pct / 100.0
+
+
+_RF_MEM: dict[str, Any] = {"t": 0.0, "v": None, "ttl": 0.0}
+_RF_TTL_FALLO = 300.0        # tras un fallo de red no se reintenta durante 5 min (evita colgar cada consulta offline)
+
+
+def _descargar_tnx() -> float | None:
+    import yfinance as yf
+    h = yf.Ticker("^TNX").history(period="5d")
+    cierre = h["Close"].dropna()
+    return float(cierre.iloc[-1]) if len(cierre) else None
+
+
+def obtener_rf(fetch: Any = None, usar_cache: bool = True) -> float | None:
+    """Tasa libre de riesgo (fraccion) del ^TNX con cache de 24 h (memoria del proceso siempre; disco solo en local).
+
+    None si no se pudo obtener o esta fuera del rango valido (el motor usa entonces ``RF_DEFECTO`` = 4.25 %).
+    ``fetch`` (inyectable en tests) devuelve el valor crudo del ^TNX."""
+    import time
+    from src.reporting import cache_local
+    ahora = time.time()
+    if usar_cache:
+        if ahora - _RF_MEM["t"] < _RF_MEM["ttl"]:
+            return _RF_MEM["v"]
+        previo = cache_local.obtener("rf:^TNX", VERSION_CODIGO)
+        if _f(previo) is not None:
+            _RF_MEM.update(t=ahora, v=float(previo), ttl=cache_local.TTL_POR_TIPO["rf"])
+            return float(previo)
+    try:
+        crudo = (fetch or _descargar_tnx)()
+    except Exception:  # noqa: BLE001  (sin red: se usa el respaldo)
+        crudo = None
+    v = normalizar_tnx(crudo)
+    if usar_cache:
+        _RF_MEM.update(t=ahora, v=v, ttl=cache_local.TTL_POR_TIPO["rf"] if v is not None else _RF_TTL_FALLO)
+        if v is not None:
+            cache_local.guardar("rf:^TNX", v, "rf", version=VERSION_CODIGO)
+    return v
+
+
+def obtener_info_mercado(ticker: str, tk_obj: Any = None, fetch: Any = None) -> dict:
+    """``info`` de yfinance con cache de 6 h en disco (solo local). ``fetch(ticker)`` o ``tk_obj.info``; {} si falla."""
+    from src.reporting import cache_local
+    clave = f"info:{ticker.upper()}"
+    previo = cache_local.obtener(clave, VERSION_CODIGO)
+    if isinstance(previo, dict) and previo:
+        return previo
+    try:
+        info = dict(fetch(ticker) if fetch else (tk_obj.info if tk_obj is not None else {}))
+    except Exception:  # noqa: BLE001
+        info = {}
+    if info:
+        cache_local.guardar(clave, info, "info", ticker, version=VERSION_CODIGO)
+    return info
+
+
+def _crecimientos_forward(e: EntradasValoracion, info: dict) -> None:
+    """Crecimiento forward de yfinance (no PIT): ingresos = ``revenueGrowth``; beneficios = ``forwardEps/trailingEps - 1``
+    o, sin eso, ``earningsGrowth``. Con conflicto de moneda no se usan. Lo que falte queda en None."""
+    if e.moneda_conflicto:
+        return
+    rg = _f(info.get("revenueGrowth"))
+    if rg is not None:
+        e.crec_forward_ingresos = rg
+        e.fuentes["crec_forward_ingresos"] = "yfinance info (revenueGrowth)"
+    fe, te = _f(info.get("forwardEps")), _f(info.get("trailingEps"))
+    if fe is not None and te is not None and fe > 0 and te > 0:
+        e.crec_forward_beneficios = fe / te - 1.0
+        e.fuentes["crec_forward_beneficios"] = "yfinance info (forwardEps / trailingEps - 1)"
+    elif _f(info.get("earningsGrowth")) is not None:
+        e.crec_forward_beneficios = float(info["earningsGrowth"])
+        e.fuentes["crec_forward_beneficios"] = "yfinance info (earningsGrowth)"
+
+
+def _ultima_fecha(df) -> str | None:
+    try:
+        return str(pd.Timestamp(df.index[-1]).date())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _clave_entradas(ticker: str, anios: int, df) -> str:
+    return f"entradas:{ticker.upper()}:{anios}:{_ultima_fecha(df)}"
+
+
+def extraer_entradas(ticker: str, tk_obj: Any, df: pd.DataFrame, info: dict | None = None,
+                     facts: pd.DataFrame | None = None, modo: str | None = None, anios: int | None = None,
+                     rf: float | None = None, usar_cache: bool = True) -> EntradasValoracion:
+    """Arma las entradas UNA vez (sin peticiones a yfinance salvo ^TNX; EDGAR solo si no se pasa ``facts``).
+
+    ``modo``: "local" (hasta ``ANIOS_LOCAL`` = 10 anios fiscales + TTM, cache SQLite en disco) o "nube" (``ANIOS_NUBE`` = 3
+    anios, SIN cache en disco, ``gc.collect()`` al terminar); por defecto se decide con ``en_nube`` (variable PORT).
+    ``anios`` fuerza los anios de historia. ``rf``: Rf ya conocida (si no, ``obtener_rf()`` consulta ^TNX con cache de 24 h).
+    Cache de disco (solo local, solo cuando los facts se piden a EDGAR aqui, no cuando se inyectan): clave
+    ticker + anios + fecha de la ultima vela; TTL 24 h; al recuperar se refresca el precio con el ``df`` actual.
     XBRL (10-K/10-Q) es la fuente primaria; el ``info`` de yfinance solo rellena lo que falte (marcado en ``fuentes``).
-    ``tk_obj`` se acepta por simetria con ``valuation_floors`` pero no se usa (los splits y dividendos salen del ``df``).
-    Todo dato faltante queda en None y se anota en ``avisos``.
-    """
+    ``tk_obj`` se acepta por simetria con ``valuation_floors`` pero no se usa. Todo dato faltante queda en None y se
+    anota en ``avisos``."""
     info = info or {}
-    e = EntradasValoracion(ticker=ticker, sector=info.get("sector"), industria=info.get("industry"))
+    modo, anios = _resolver_modo(modo, anios)
+    from src.reporting import cache_local
+    cachear = bool(usar_cache and facts is None and modo == "local" and cache_local.habilitado())
+    if cachear:
+        previo = cache_local.obtener(_clave_entradas(ticker, anios, df), VERSION_CODIGO)
+        if isinstance(previo, dict):
+            e = EntradasValoracion.desde_dict(previo)
+            if df is not None and not df.empty and "Close" in df.columns:
+                e.precio = _f(df["Close"].iloc[-1])
+            if _f(info.get("beta")) is not None:
+                e.beta = _f(info.get("beta"))
+            e.rf = rf if rf is not None else obtener_rf()
+            _crecimientos_forward(e, info)
+            e.fuentes["cache"] = "cache local en disco (entradas)"
+            return e
+    e = EntradasValoracion(ticker=ticker, sector=info.get("sector"), industria=info.get("industry"), modo=modo,
+                           anios_historia=anios)
     fu, av = e.fuentes, e.avisos
     cot, rep_ = info.get("currency"), info.get("financialCurrency")
     e.moneda_cotizacion, e.moneda_reporte = (str(cot) if cot else None), (str(rep_) if rep_ else None)
@@ -1214,19 +1849,32 @@ def extraer_entradas(ticker: str, tk_obj: Any, df: pd.DataFrame, info: dict | No
         if getattr(splits.index, "tz", None) is not None:
             splits = splits.copy()
             splits.index = splits.index.tz_localize(None)
+    edgar_ok = True
     if facts is None:
         try:
             facts = _vf()._facts(ticker)
         except Exception as ex:  # noqa: BLE001
             av.append(f"EDGAR no disponible ({type(ex).__name__}): se usa yfinance donde se pueda")
-            facts = None
+            facts, edgar_ok = None, False
     if facts is not None:
         try:
-            _extraer_xbrl(e, facts, splits, df)
+            _extraer_xbrl(e, facts, splits, df, anios,
+                          info.get("sharesOutstanding") or info.get("impliedSharesOutstanding"))
         except Exception as ex:  # noqa: BLE001
             av.append(f"XBRL incompleto ({type(ex).__name__}: {ex}): se usa yfinance donde se pueda")
+            edgar_ok = False
     _completar_con_info(e, info, df)
     _validar_por_accion(e)
+    _crecimientos_forward(e, info)
+    e.rf = rf if rf is not None else obtener_rf()
+    if e.rf is not None:
+        fu["rf"] = "^TNX (yfinance), cache 24 h"
+    if cachear and edgar_ok and e.fecha_ltm:
+        cache_local.guardar(_clave_entradas(ticker, anios, df), e.to_dict(), "entradas", ticker, version=VERSION_CODIGO)
+    if modo == "nube":
+        import gc
+        del facts
+        gc.collect()
     return e
 
 
@@ -1246,10 +1894,15 @@ def _validar_por_accion(e: EntradasValoracion) -> None:
         e.datos_inconsistentes.append("eps_ltm")
 
 
-def _extraer_xbrl(e: EntradasValoracion, facts: pd.DataFrame, splits, df) -> None:
+
+def _extraer_xbrl(e: EntradasValoracion, facts: pd.DataFrame, splits, df, anios: int = ANIOS_HISTORIA,
+                  acciones_info: float | None = None) -> None:
+    """Rellena ``e`` desde XBRL: LTM, hasta ``anios`` anios fiscales de historia (+ el LTM actual), series anuales
+    alineadas y serie TTM trimestral. La ventana de facts es ``anios + 3`` anios (margen para CAGR a 5Y y multiplos)."""
     fu, av = e.fuentes, e.avisos
     ult = facts["period_end"].max()
-    facts = facts[facts["period_end"] >= ult - pd.DateOffset(years=ANIOS_HISTORIA + 3)]
+    facts = facts[facts["period_end"] >= ult - pd.DateOffset(years=anios + 3)]
+    n_hist = anios + 1
     rev_q, ocf_q, cx_q = _flujo(facts, _REV), _flujo(facts, _OCF), _flujo(facts, _CAPEX)
     ebit_q, da_q = _flujo(facts, _EBIT), _flujo(facts, _DA)
     eps_q = _flujo(facts, _EPS, splits, True)
@@ -1276,18 +1929,28 @@ def _extraer_xbrl(e: EntradasValoracion, facts: pd.DataFrame, splits, df) -> Non
     if vigente(ebit_q) and vigente(da_q):
         idx = ebit_q.index.intersection(da_q.index)
         ebitda_q = (ebit_q.reindex(idx) + da_q.reindex(idx)).dropna()
+    neto_q, div_q = _flujo(facts, _NETO), _flujo(facts, _DIVIDENDOS)
     for campo, q, nombre in (("fcf_ltm", fcf_q, "OCF - CapEx"), ("ebitda_ltm", ebitda_q, "EBIT + D&A"),
                              ("ebit_ltm", ebit_q, nombre_ebit), ("ingresos_ltm", rev_q, "Revenues"),
-                             ("eps_ltm", eps_q, "EPS diluido"), ("da_ltm", da_q, "D&A"), ("capex_ltm", cx_q, "CapEx")):
+                             ("eps_ltm", eps_q, "EPS diluido"), ("da_ltm", da_q, "D&A"), ("capex_ltm", cx_q, "CapEx"),
+                             ("neto_ltm", neto_q, "NetIncomeLoss"), ("ocf_ltm", ocf_q, "OCF"),
+                             ("dividendos_pagados_ltm", div_q, "PaymentsOfDividends")):
         v = _ltm(q) if vigente(q) else None
         if v is not None:
             setattr(e, campo, v)
             fu[campo] = f"SEC EDGAR XBRL ({nombre})"
     if e.capex_ltm is not None:
         e.capex_ltm = abs(e.capex_ltm)
+    if e.dividendos_pagados_ltm is not None:
+        e.dividendos_pagados_ltm = abs(e.dividendos_pagados_ltm)
+    fechas_por: dict[str, list] = {}
     for campo, q in (("hist_fcf", fcf_q), ("hist_ebitda", ebitda_q), ("hist_ingresos", rev_q), ("hist_eps", eps_q)):
         if vigente(q):
-            setattr(e, campo, _historia(q))
+            vals, fs = _historia_fechas(q, n_hist)
+            setattr(e, campo, vals)
+            fechas_por[campo] = fs
+    fechas_hist = next((fechas_por[c] for c in ("hist_ingresos", "hist_ebitda", "hist_fcf", "hist_eps")
+                        if fechas_por.get(c)), [])
     # Impuestos y intereses
     imp, pre = (_ltm(imp_q) if vigente(imp_q) else None), (_ltm(pre_q) if vigente(pre_q) else None)
     if imp is not None and pre is not None and pre > 0:
@@ -1299,7 +1962,7 @@ def _extraer_xbrl(e: EntradasValoracion, facts: pd.DataFrame, splits, df) -> Non
     # Balance
     caja_s, deuda_s = _caja_serie(facts), _deuda_serie(facts)
     sh_dil = _acciones_serie(facts, splits)
-    sh_q = _acciones_serie(facts, splits, (_ACCIONES_DIL, _ACCIONES_BAS))   # historia: diluido y, si falta, basico
+    sh_q = _depurar_acciones(_acciones_serie(facts, splits, (_ACCIONES_DIL, _ACCIONES_BAS)))   # historia: diluido y, si falta, basico
     eq_s = _instante(facts, _EQUITY)
     c, d = _asof(caja_s, fecha, 150), _asof(deuda_s, fecha, 150)
     if c is not None:
@@ -1322,7 +1985,14 @@ def _extraer_xbrl(e: EntradasValoracion, facts: pd.DataFrame, splits, df) -> Non
         fu["acciones_diluidas"] = origen
         if "diluido" not in origen:
             e.acciones_nota = origen
+    sh_hist = sh if sh and sh > 0 else (_f(acciones_info) if acciones_info and not e.moneda_conflicto else None)
+    if sh_hist and sh_hist > 0 and not rev_q.empty and _asof(sh_q, fecha, 150) is None:   # p. ej. V: sin promedio reciente
+        sh_q = pd.Series({d: (_asof(sh_q, d, 150) or float(sh_hist)) for d in rev_q.index}, dtype=float).sort_index()
+        av.append("acciones históricas no disponibles en XBRL: donde faltan se asume el número actual de acciones "
+                  "(aproximación para múltiplos y serie historica)")
     eq = _asof(eq_s, fecha, 150)
+    if eq is not None:
+        e.patrimonio = eq
     if eq is not None and sh and sh > 0:
         e.bvps = eq / sh
         fu["bvps"] = "SEC EDGAR XBRL (patrimonio / acciones)"
@@ -1331,6 +2001,31 @@ def _extraer_xbrl(e: EntradasValoracion, facts: pd.DataFrame, splits, df) -> Non
         deuda_cp = _asof(_instante(facts, _DEUDA_CP + ["us-gaap:LongTermDebtCurrent"]), fecha, 150) or 0.0
         e.nwc_operativo = (ac - c) - (pc - deuda_cp)
         fu["nwc_operativo"] = "SEC EDGAR XBRL ((activo corriente - caja) - (pasivo corriente - deuda corto plazo))"
+    # Series anuales alineadas (cada ejercicio = LTM al cierre del trimestre correspondiente)
+    if fechas_hist:
+        e.hist_fechas = [str(f.date()) for f in fechas_hist]
+        ttm = {k: _ttm_rolling(q) for k, q in (("ebit", ebit_q), ("neto", neto_q), ("ocf", ocf_q), ("capex", cx_q),
+                                               ("div", div_q), ("imp", imp_q), ("pre", pre_q))}
+        e.hist_ebit = [_valor_en(ttm["ebit"], f) for f in fechas_hist]
+        e.hist_neto = [_valor_en(ttm["neto"], f) for f in fechas_hist]
+        e.hist_ocf = [_valor_en(ttm["ocf"], f) for f in fechas_hist]
+        e.hist_capex = [abs(v) if v is not None else None for v in (_valor_en(ttm["capex"], f) for f in fechas_hist)]
+        e.hist_dividendos = [abs(v) if v is not None else None for v in (_valor_en(ttm["div"], f) for f in fechas_hist)]
+        tasas = []
+        for f in fechas_hist:
+            i_, p_ = _valor_en(ttm["imp"], f), _valor_en(ttm["pre"], f)
+            tasas.append(_clip(i_ / p_, 0.0, TASA_IMPOSITIVA_MAX) if i_ is not None and p_ and p_ > 0 else None)
+        e.hist_tasa = tasas
+        e.hist_deuda = [_asof(deuda_s, f, 150) for f in fechas_hist]
+        e.hist_caja = [_asof(caja_s, f, 150) for f in fechas_hist]
+        e.hist_patrimonio = [_asof(eq_s, f, 150) for f in fechas_hist]
+        e.hist_acciones = [_asof(sh_dil, f, 150) or _asof(sh_q, f, 150) for f in fechas_hist]
+    # Serie TTM trimestral (insumo de la serie historica del valor justo)
+    e.serie_ttm = _construir_serie_ttm(
+        {"ing": rev_q, "ebit": ebit_q, "ebitda": ebitda_q, "fcf": fcf_q, "eps": eps_q, "neto": neto_q, "da": da_q,
+         "capex": cx_q, "interes": int_q, "impuesto": imp_q, "pre": pre_q, "ocf": ocf_q},
+        {"caja": caja_s, "deuda": deuda_s, "patrimonio": eq_s, "acciones": sh_q, "ac": _instante(facts, _ACTIVO_CORR),
+         "pc": _instante(facts, _PASIVO_CORR), "dcp": _instante(facts, _DEUDA_CP + ["us-gaap:LongTermDebtCurrent"])})
     # Multiplos historicos propios
     if df is not None and not df.empty:
         idx = pd.DatetimeIndex(df.index)
@@ -1338,7 +2033,7 @@ def _extraer_xbrl(e: EntradasValoracion, facts: pd.DataFrame, splits, df) -> Non
         precio.index = idx.tz_localize(None) if idx.tz is not None else idx
         e.multiplos_hist = _instantaneas_multiplos(
             precio, eps_q if vigente(eps_q) else pd.Series(dtype=float), fcf_q, ebitda_q,
-            rev_q if vigente(rev_q) else pd.Series(dtype=float), sh_q, caja_s, deuda_s, eq_s)
+            rev_q if vigente(rev_q) else pd.Series(dtype=float), sh_q, caja_s, deuda_s, eq_s, k_max=anios)
 
 
 def _completar_con_info(e: EntradasValoracion, info: dict, df) -> None:
@@ -1394,3 +2089,300 @@ def _completar_con_info(e: EntradasValoracion, info: dict, df) -> None:
     e.dividendo_anual = div
     if e.fcf_ltm is None:
         e.avisos.append("FCF no disponible")
+
+
+# --- Serie historica del Valor Justo (estilo GuruFocus GF Value) -----------------------------------------------------
+def _hash_estable(*objs: Any) -> str:
+    import hashlib
+    return hashlib.md5(repr(objs).encode("utf-8")).hexdigest()[:12]
+
+
+def _cercano(fechas: np.ndarray, objetivo: pd.Timestamp, tol_dias: int) -> int | None:
+    """Indice de la fecha mas cercana a ``objetivo`` (dentro de ``tol_dias``) en el arreglo ordenado ``fechas``."""
+    if len(fechas) == 0:
+        return None
+    i = int(np.searchsorted(fechas, np.datetime64(objetivo)))
+    mejor, dmin = None, None
+    for j in (i - 1, i):
+        if 0 <= j < len(fechas):
+            d = abs((pd.Timestamp(fechas[j]) - objetivo).days)
+            if d <= tol_dias and (dmin is None or d < dmin):
+                mejor, dmin = j, d
+    return mejor
+
+
+def _entradas_en(e: EntradasValoracion, rows: list[dict], fechas_rows: np.ndarray, i: int, t: pd.Timestamp,
+                 px_raw: pd.Series, div: pd.Series | None, k_max: int) -> EntradasValoracion | None:
+    """``EntradasValoracion`` de la fecha de PUBLICACION ``t`` del cierre ``rows[i]``: solo usa filas ``<= i`` y precios
+    ``<= t`` (sin look-ahead). Rf, ERP, beta, sector y moneda son los VIGENTES (no son PIT). Sin forward de yfinance."""
+    r = rows[i]
+    px_t = _px_asof(px_raw, t)
+    sh = _f(r.get("acciones"))
+    if px_t is None or not sh or sh <= 0:
+        return None
+    d_i = pd.Timestamp(r["fecha"])
+    pre, imp = _f(r.get("pre")), _f(r.get("impuesto"))
+    eq = _f(r.get("patrimonio"))
+    ac, pc, caja, dcp = _f(r.get("ac")), _f(r.get("pc")), _f(r.get("caja")), _f(r.get("dcp")) or 0.0
+    ent = EntradasValoracion(
+        ticker=e.ticker, precio=px_t, acciones_diluidas=sh, fcf_ltm=_f(r.get("fcf")), ebitda_ltm=_f(r.get("ebitda")),
+        ebit_ltm=_f(r.get("ebit")), ingresos_ltm=_f(r.get("ing")), eps_ltm=_f(r.get("eps")),
+        bvps=eq / sh if eq is not None else None, caja=caja, deuda_total=_f(r.get("deuda")),
+        tasa_impositiva=_clip(imp / pre, 0.0, TASA_IMPOSITIVA_MAX) if imp is not None and pre and pre > 0 else None,
+        capex_ltm=abs(_f(r.get("capex"))) if _f(r.get("capex")) is not None else None, da_ltm=_f(r.get("da")),
+        nwc_operativo=(ac - caja) - (pc - dcp) if ac is not None and pc is not None and caja is not None else None,
+        gasto_interes_ltm=abs(_f(r.get("interes"))) if _f(r.get("interes")) is not None else None,
+        beta=e.beta, rf=e.rf, sector=e.sector, industria=e.industria, moneda_conflicto=e.moneda_conflicto)
+    if div is not None and len(div):
+        ent.dividendo_anual = float(div[(div.index > t - pd.Timedelta(days=365)) & (div.index <= t)].sum())
+    # Series anuales hasta d_i: un punto por ejercicio (filas ~1 anio antes cada una)
+    for campo, clave in (("hist_fcf", "fcf"), ("hist_ingresos", "ing"), ("hist_ebitda", "ebitda"), ("hist_eps", "eps")):
+        vals = []
+        for k in range(ANIOS_HISTORIA, -1, -1):
+            j = _cercano(fechas_rows[:i + 1], d_i - pd.DateOffset(years=k), 50)
+            v = _f(rows[j].get(clave)) if j is not None else None
+            if v is not None:
+                vals.append(v)
+        setattr(ent, campo, vals)
+    # Multiplos propios en k = 1..k_max anios antes (snapshot publicado hace >= 1 anio: nunca posterior a t)
+    mh: dict[str, list[float]] = {k: [] for k in RANGOS_MULTIPLOS}
+    for k in range(k_max, 0, -1):
+        j = _cercano(fechas_rows[:i + 1], d_i - pd.DateOffset(years=k), 50)
+        if j is None:
+            continue
+        rj = rows[j]
+        pj = _px_asof(px_raw, pd.Timestamp(rj["fecha"]) + pd.Timedelta(days=REZAGO_PUBLICACION_DIAS))
+        shj = _f(rj.get("acciones"))
+        if pj is None or not shj:
+            continue
+        cap = pj * shj
+        eps_j, fcf_j, eb_j, rev_j, eq_j = (_f(rj.get(x)) for x in ("eps", "fcf", "ebitda", "ing", "patrimonio"))
+        if eps_j and eps_j > 0:
+            mh["pe"].append(pj / eps_j)
+        if fcf_j and fcf_j > 0:
+            mh["p_fcf"].append(cap / fcf_j)
+        c_j, d_j = _f(rj.get("caja")), _f(rj.get("deuda"))
+        if c_j is not None and d_j is not None:
+            if eb_j and eb_j > 0:
+                mh["ev_ebitda"].append((cap + d_j - c_j) / eb_j)
+            if rev_j and rev_j > 0:
+                mh["ev_revenue"].append((cap + d_j - c_j) / rev_j)
+        if eq_j and eq_j > 0:
+            mh["pb"].append(cap / eq_j)
+    ent.multiplos_hist = mh
+    _validar_por_accion(ent)
+    return ent
+
+
+def _px_asof(s: pd.Series, t: pd.Timestamp, max_dias: int = 10) -> float | None:
+    """Ultimo cierre en o antes de ``t`` (maximo ``max_dias`` de antiguedad); None si no hay."""
+    i = int(s.index.searchsorted(t, side="right")) - 1
+    if i < 0 or (t - s.index[i]).days > max_dias:
+        return None
+    return float(s.iloc[i])
+
+
+def _smoothstep(u: np.ndarray) -> np.ndarray:
+    u = np.clip(u, 0.0, 1.0)
+    return u * u * (3.0 - 2.0 * u)
+
+
+def suavizar_causal(eventos: list[tuple[pd.Timestamp, pd.Timestamp, float]], grilla: pd.DatetimeIndex) -> np.ndarray:
+    """Evalua en ``grilla`` la curva que, en cada evento ``(inicio, fin, valor)``, transita de forma monotona (smoothstep,
+    C1) del valor anterior al nuevo entre ``inicio`` y ``fin`` y se mantiene hasta el siguiente evento. Es CAUSAL: el valor
+    en ``x`` solo depende de eventos con ``inicio <= x`` (un spline interpolante entre reportes usaria el reporte
+    siguiente = look-ahead). Antes del primer evento devuelve NaN."""
+    ini = np.array([pd.Timestamp(a).value for a, _, _ in eventos], dtype=float)
+    fin = np.array([pd.Timestamp(b).value for _, b, _ in eventos], dtype=float)
+    val = np.array([v for _, _, v in eventos], dtype=float)
+    x = grilla.values.astype("datetime64[ns]").astype(np.int64).astype(float)
+    k = np.searchsorted(ini, x, side="right") - 1
+    out = np.full(len(x), np.nan)
+    ok = k >= 0
+    kk = np.where(ok, k, 0)
+    prev = np.where(kk > 0, val[np.maximum(kk - 1, 0)], val[kk])
+    dur = np.maximum(fin[kk] - ini[kk], 1.0)
+    u = (x - ini[kk]) / dur
+    out[ok] = (prev + (val[kk] - prev) * _smoothstep(u))[ok]
+    return out
+
+
+def _fmt_banda(p: int) -> str:
+    return f"{'+' if p > 0 else '-'}{abs(p)}%"
+
+
+def _g_proyeccion(modelos_medio: list[dict]) -> tuple[float, str]:
+    """Tasa de proyeccion ILUSTRATIVA: ``PROYECCION_AMORTIGUACION*g1_medio + (1-PROYECCION_AMORTIGUACION)*g∞``, con g1_medio =
+    promedio de la etapa 1 de los DCF aplicables del Medio; acotada a [0, PROYECCION_TOPE]."""
+    g1s = [m["g1"] for m in modelos_medio if m.get("aplicable") and m.get("g1") is not None]
+    ginf = G_TERMINAL["medio"]
+    if not g1s:
+        return ginf, "sin DCF aplicables: g∞ del Medio"
+    g = PROYECCION_AMORTIGUACION * float(np.mean(g1s)) + (1.0 - PROYECCION_AMORTIGUACION) * ginf
+    return _clip(g, 0.0, PROYECCION_TOPE), (f"{PROYECCION_AMORTIGUACION:.0%} x g etapa 1 medio de los DCF "
+                                            f"({np.mean(g1s) * 100:.1f} %) + {1 - PROYECCION_AMORTIGUACION:.0%} x g∞")
+
+
+def serie_valor_justo_historica(entradas: Any, df: pd.DataFrame, params: Any = None,
+                                modelos_activos: list[str] | None = None, modo: str | None = None,
+                                anios: int | None = None, usar_cache: bool = True,
+                                paso_dias: int = PASO_SERIE_DIAS) -> dict:
+    """Curva historica del Valor Justo (escenario MEDIO) con 6 bandas simetricas y proyeccion ilustrativa de 12 meses.
+
+    Metodo
+    ------
+    1. Para cada cierre trimestral de ``entradas.serie_ttm`` (TTM de EDGAR) se arma un ``EntradasValoracion`` valido en su
+       FECHA DE PUBLICACION (cierre + ``REZAGO_PUBLICACION_DIAS`` = 45 d) y se corre el motor Medio completo (mismos 15
+       modelos y misma consolidacion por familias que el valor actual). PIT estricto: cada punto usa solo filas y precios
+       publicados hasta su fecha; la mediana de multiplos en t usa solo ejercicios >= 1 anio anteriores; el crecimiento
+       forward de yfinance NO se usa (no es PIT).
+    2. Suavizado CAUSAL entre reportes (``suavizar_causal``): tras cada reporte la curva transita en ``TRANSICION_DIAS`` (45 d)
+       con smoothstep monotono (sin escalones, sin overshoot) y se mantiene hasta el siguiente. Se prefiere a un spline
+       interpolante porque este usaria el reporte siguiente (look-ahead).
+    3. ANCLA: el ultimo punto (ultima vela) es el valor justo Medio ACTUAL (``entradas`` completas, con forward y el ultimo
+       balance); el tramo final se ajusta para aterrizar en el (es lo unico no-PIT, y se informa en ``notas``/``ancla``).
+    4. Bandas: valor justo x (1 + p), p en {+30, +20, +10, -10, -20, -30} %.
+    5. Proyeccion (ILUSTRATIVA, no una prediccion): el valor justo crece ``g_proyeccion`` anual durante 12 meses desde el
+       ancla (``_g_proyeccion``: 50 % del crecimiento de etapa 1 de los DCF Medio + 50 % de g∞, tope 15 %).
+    No son PIT y se declaran: Rf (^TNX), ERP, beta, sector y los sliders del usuario (WACC/g) son los VIGENTES para todas
+    las fechas. Con menos de MIN_PUNTOS_MULTIPLO ejercicios previos los multiplos no aplican y la curva se apoya en DCF y
+    Valor (en nube, 3 anios de historia, hay menos puntos).
+    Devuelve estructuras ligeras (fechas ISO y floats; None donde no hay dato): {ticker, modo, anios, fechas, valor_justo,
+    precio, bandas{"+30%"...}, proyeccion{fechas, valor_justo, bandas, g_anual, metodo}, ancla{fecha, valor_justo},
+    puntos_trimestrales[...], notas[...], ilustrativa_proyeccion, desde_cache, tiempo_s}. Con cache de disco en local."""
+    import time
+    t0 = time.time()
+    e, p = _como_entradas(entradas), _como_params(params)
+    modo, anios = _resolver_modo(modo or e.modo, anios or (None if modo else e.anios_historia))
+    ticker = e.ticker or ""
+    base = {"ticker": ticker, "modo": modo, "anios": anios, "fechas": [], "valor_justo": [], "precio": [],
+            "bandas": {_fmt_banda(b): [] for b in BANDAS_PCT},
+            "proyeccion": {"fechas": [], "valor_justo": [], "bandas": {_fmt_banda(b): [] for b in BANDAS_PCT},
+                           "g_anual": None, "metodo": None},
+            "ancla": None, "puntos_trimestrales": [], "notas": [], "ilustrativa_proyeccion": True,
+            "escenario": "medio", "desde_cache": False, "tiempo_s": 0.0}
+    notas = base["notas"]
+    if df is None or len(df) == 0 or "Close" not in df.columns:
+        notas.append("sin precios: no se puede construir la serie")
+        return base
+    from src.reporting import cache_local
+    cachear = bool(usar_cache and modo == "local" and cache_local.habilitado())
+    clave = f"serie_vj:{ticker.upper()}:{anios}:{_ultima_fecha(df)}:{_hash_estable(asdict(p), sorted(modelos_activos) if modelos_activos is not None else None, paso_dias, e.fecha_ltm, e.precio)}"
+    if cachear:
+        previo = cache_local.obtener(clave, VERSION_CODIGO)
+        if isinstance(previo, dict) and previo.get("fechas"):
+            previo["desde_cache"], previo["tiempo_s"] = True, round(time.time() - t0, 4)
+            return previo
+    idx = pd.DatetimeIndex(df.index)
+    idx = idx.tz_localize(None) if idx.tz is not None else idx
+    px_raw = _precio_sin_ajuste_dividendos(df)
+    px_raw.index = idx
+    div = None
+    if "Dividends" in df.columns:
+        div = df["Dividends"].fillna(0.0).astype(float).copy()
+        div.index = idx
+        div = div[div > 0]
+    ultima = idx[-1]
+    rows = [r for r in (e.serie_ttm or []) if r.get("fecha")]
+    fechas_rows = np.array([np.datetime64(pd.Timestamp(r["fecha"])) for r in rows])
+    inicio = ultima - pd.DateOffset(years=anios)
+    notas.append("Parámetros de mercado NO point-in-time: Rf (^TNX), ERP, beta, sector y los sliders de WACC/g son los "
+                 "vigentes en todas las fechas.")
+    notas.append("Suavizado causal: tras cada reporte el valor justo transita en "
+                 f"{TRANSICION_DIAS} días; no se usa el reporte siguiente (sin look-ahead).")
+    notas.append("El crecimiento forward de yfinance no se usa en los puntos históricos (no es PIT); el último punto (ancla) "
+                 "sí lo incluye.")
+    k_max = min(anios, 10)
+    puntos: list[dict] = []
+    descartados: list[str] = []
+    for i, r in enumerate(rows):
+        t = pd.Timestamp(r["fecha"]) + pd.Timedelta(days=REZAGO_PUBLICACION_DIAS)
+        if t < inicio - pd.Timedelta(days=100) or t > ultima - pd.Timedelta(days=ANCLA_SEPARACION_DIAS):
+            continue
+        ent = _entradas_en(e, rows, fechas_rows, i, t, px_raw, div, k_max)
+        if ent is None:
+            continue
+        veci = [_f(rows[j].get("acciones")) for j in range(max(0, i - 4), min(len(rows), i + 5)) if j != i]
+        veci = [x for x in veci if x and x > 0]
+        if veci and ent.acciones_diluidas:
+            m_v = float(np.median(veci))
+            if not m_v / SALTO_ACCIONES_X <= ent.acciones_diluidas <= m_v * SALTO_ACCIONES_X:
+                descartados.append(f"{r['fecha']}: acciones {ent.acciones_diluidas:,.0f} difieren > {SALTO_ACCIONES_X:g}x de sus vecinas")
+                continue
+        ms = calcular_modelos(ent, p, "medio")
+        agg = agregar_valor_justo(ms, modelos_activos, p.margen_seguridad, ent.precio)
+        if agg["fair_value"] is None:
+            continue
+        if ent.precio and not ent.precio / VJ_ABSURDO_X <= agg["fair_value"] <= ent.precio * VJ_ABSURDO_X:
+            descartados.append(f"{r['fecha']}: valor justo {agg['fair_value']:,.2f} absurdo frente al precio {ent.precio:,.2f} "
+                               f"(fuera de [1/{VJ_ABSURDO_X:g}x, {VJ_ABSURDO_X:g}x])")
+            continue
+        puntos.append({"fecha_cierre": r["fecha"], "fecha_publicacion": str(t.date()),
+                       "valor_justo": float(agg["fair_value"]), "n_modelos": agg["n_usados"]})
+    if descartados:
+        notas.append(f"{len(descartados)} punto(s) trimestral(es) descartado(s) por dato absurdo (la curva no los usa): "
+                     + "; ".join(descartados))
+    base["puntos_descartados"] = len(descartados)
+    # Ancla: valor justo Medio ACTUAL
+    ms_act = calcular_modelos(e, p, "medio")
+    agg_act = agregar_valor_justo(ms_act, modelos_activos, p.margen_seguridad, e.precio)
+    v_act = agg_act["fair_value"]
+    if v_act is None and not puntos:
+        notas.append("sin valor justo calculable (datos insuficientes)")
+        base["tiempo_s"] = round(time.time() - t0, 4)
+        return base
+    if v_act is None:
+        notas.append("sin valor justo actual: no hay ancla; la serie termina en el ultimo reporte")
+    base["puntos_trimestrales"] = puntos
+    ev: list[tuple[pd.Timestamp, pd.Timestamp, float]] = []
+    for k, pt in enumerate(puntos):
+        ini = pd.Timestamp(pt["fecha_publicacion"])
+        sig = pd.Timestamp(puntos[k + 1]["fecha_publicacion"]) if k + 1 < len(puntos) else None
+        fin = ini + pd.Timedelta(days=TRANSICION_DIAS)
+        if sig is not None:
+            fin = min(fin, sig)
+        ev.append((ini, fin, pt["valor_justo"]))
+    ancla_info = None
+    if v_act is not None:
+        ini_a = ultima - pd.Timedelta(days=TRANSICION_DIAS)
+        if ev and ev[-1][0] > ini_a:              # ultimo reporte reciente: el tramo hasta el ancla se reparte a mitades
+            ini_a = ev[-1][0] + (ultima - ev[-1][0]) / 2
+        if ev:
+            ev[-1] = (ev[-1][0], min(ev[-1][1], ini_a), ev[-1][2])
+        ev.append((ini_a, ultima, float(v_act)))
+        prev = ev[-2][2] if len(ev) > 1 else None
+        ancla_info = {"fecha": str(ultima.date()), "valor_justo": float(v_act), "precio": _f(e.precio),
+                      "salto_vs_reporte_previo_pct": ((v_act / prev - 1.0) * 100.0) if prev else None}
+        base["ancla"] = ancla_info
+    ini_s = max(ev[0][0], inicio) if ev else inicio
+    grilla = pd.date_range(ini_s, ultima, freq=f"{max(1, int(paso_dias))}D")
+    if len(grilla) == 0 or grilla[-1] != ultima:
+        grilla = grilla.append(pd.DatetimeIndex([ultima]))
+    vj = suavizar_causal(ev, grilla)
+    ok = np.isfinite(vj)
+    grilla, vj = grilla[ok], vj[ok]
+    base["fechas"] = [str(d.date()) for d in grilla]
+    base["valor_justo"] = [round(float(v), 4) for v in vj]
+    base["precio"] = [(_px_asof(px_raw, d) if d <= ultima else None) for d in grilla]
+    base["precio"] = [round(v, 4) if v is not None else None for v in base["precio"]]
+    base["bandas"] = {_fmt_banda(b): [round(float(v) * (1 + b / 100.0), 4) for v in vj] for b in BANDAS_PCT}
+    if v_act is not None:
+        g, metodo = _g_proyeccion(ms_act)
+        dias = np.arange(0, PROYECCION_DIAS + 1, max(1, int(paso_dias)))
+        if dias[-1] != PROYECCION_DIAS:
+            dias = np.append(dias, PROYECCION_DIAS)
+        vp = float(v_act) * (1.0 + g) ** (dias / 365.0)
+        base["proyeccion"] = {
+            "fechas": [str((ultima + pd.Timedelta(days=int(d))).date()) for d in dias],
+            "valor_justo": [round(float(v), 4) for v in vp],
+            "bandas": {_fmt_banda(b): [round(float(v) * (1 + b / 100.0), 4) for v in vp] for b in BANDAS_PCT},
+            "g_anual": g, "metodo": metodo + "; ILUSTRATIVA, no una predicción"}
+    if not puntos:
+        notas.append("sin reportes trimestrales utilizables en la ventana: solo el valor justo actual")
+    base["tiempo_s"] = round(time.time() - t0, 4)
+    if cachear:
+        cache_local.guardar(clave, base, "serie_vj", ticker, version=VERSION_CODIGO)
+    if modo == "nube":
+        import gc
+        gc.collect()
+    return base

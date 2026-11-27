@@ -7,8 +7,8 @@ import app_ui as ui_mod
 from src.levels import fair_value as fv
 from src.levels.fair_value import EntradasValoracion as Ent
 from src.levels.fair_value import ParametrosValoracion as Par
-from test_fair_value import (_df_precios, _entradas_ricas, _facts_falsos, cliente, ent, modelo, px,  # noqa: F401
-                             vista)
+from test_fair_value import (_df_precios, _entradas_ricas, _facts_falsos, _sin_red_ni_disco, cliente, ent,  # noqa: F401
+                             modelo, px, vista)
 
 
 def _textos(cliente_):
@@ -18,24 +18,27 @@ def _textos(cliente_):
 
 # ================================================================ A1: FCFF (sin doble conteo de intereses)
 def test_dcf_fcf_suma_los_intereses_despues_de_impuestos():
-    # FCFE 105 + intereses 60*(1-0.25) = 150 (FCFF) ; valor = 150*1.02/(0.09-0.02) = 2185.714 ; - deuda 1000 ; / 10 = 118.5714
+    # FCFE 105 + intereses 60*(1-0.25) = 150 (FCFF) ; valor = 150*1.02/(0.09-0.02) * 1.09^0.5 (mitad de anio) ;
+    # - deuda 1000 ; / 10 (sin el factor de mitad de anio seria 118.5714)
     e = ent(fcf_ltm=105.0, deuda_total=1000.0, gasto_interes_ltm=60.0)
-    esperado = (150.0 * 1.02 / 0.07 - 1000.0) / 10.0
-    assert esperado == pytest.approx(118.5714, abs=1e-4)
+    esperado = (150.0 * 1.02 / 0.07 * 1.09 ** 0.5 - 1000.0) / 10.0
+    assert esperado == pytest.approx(128.19527, abs=1e-4)
     assert px(e, "dcf_5y_fcf", Par(wacc=0.09, g=0.02)) == pytest.approx(esperado, rel=1e-9)
     assert px(e, "dcf_10y_fcf", Par(wacc=0.09, g=0.02)) == pytest.approx(esperado, rel=1e-9)
 
 
 def test_dcf_fcf_sin_gasto_de_intereses_no_ajusta_y_p_fcf_no_cambia():
     e = ent(fcf_ltm=105.0, deuda_total=1000.0)
-    assert px(e, "dcf_5y_fcf", Par(wacc=0.09, g=0.02)) == pytest.approx((105 * 1.02 / 0.07 - 1000) / 10, rel=1e-9)
+    assert px(e, "dcf_5y_fcf", Par(wacc=0.09, g=0.02)) == pytest.approx((105 * 1.02 / 0.07 * 1.09 ** 0.5 - 1000) / 10,
+                                                                        rel=1e-9)
     con = ent(fcf_ltm=105.0, deuda_total=1000.0, gasto_interes_ltm=60.0)
     assert px(con, "p_fcf", Par(p_fcf_objetivo=12.0)) == pytest.approx(105 / 10 * 12.0)   # multiplo de patrimonio: sin ajuste
 
 
 def test_dcf_revenue_tambien_usa_margen_fcff():
     e = ent(ingresos_ltm=1000.0, fcf_ltm=105.0, deuda_total=1000.0, gasto_interes_ltm=60.0)
-    assert px(e, "dcf_5y_revenue", Par(wacc=0.09, g=0.02)) == pytest.approx((150 * 1.02 / 0.07 - 1000) / 10, rel=1e-9)
+    assert px(e, "dcf_5y_revenue", Par(wacc=0.09, g=0.02)) == pytest.approx((150 * 1.02 / 0.07 * 1.09 ** 0.5 - 1000) / 10,
+                                                                            rel=1e-9)
 
 
 def test_dcf_fcf_ya_no_coincide_con_ebitda_solo_por_los_intereses():
@@ -114,7 +117,7 @@ def test_acciones_basicas_si_no_hay_diluido_ni_portada_y_portada_ambigua_se_igno
 
 def test_historia_de_acciones_rellena_con_el_basico_y_los_multiplos_siguen_calculandose():
     e = fv.extraer_entradas("T", None, _df_precios(), {}, facts=_facts_falsos(flujos={_DIL: None, _BAS: 10.0}))
-    assert len(e.multiplos_hist["p_fcf"]) == 5 and all(v == pytest.approx(10.0) for v in e.multiplos_hist["p_fcf"])
+    assert len(e.multiplos_hist["p_fcf"]) == 6 and all(v == pytest.approx(10.0) for v in e.multiplos_hist["p_fcf"])
 
 
 def test_ebit_de_respaldo_desde_utilidad_antes_de_impuestos_mas_intereses():
@@ -191,11 +194,12 @@ def test_tasa_efectiva_tiene_piso():
 
 
 def test_pisos_de_beta_y_wacc_y_rf_por_defecto():
-    assert (fv.BETA_MIN, fv.WACC_MIN, fv.RF_DEFECTO) == (0.7, 0.075, 0.045)
-    t = fv.calcular_tasas(ent(beta=0.3), Par(rf=0.04, erp=0.05))     # beta -> 0.7 ; ke = 0.075 ; WACC = 0.075 (piso)
-    assert t["beta"] == 0.7 and t["ke_capm"] == pytest.approx(0.075) and t["wacc"] == pytest.approx(0.075)
-    assert any("beta 0.30 acotada a 0.70" in x for x in t["topes_ke"])
-    t2 = fv.calcular_tasas(ent(beta=0.7), Par(rf=0.03, erp=0.04))    # ke = 0.058 < piso: WACC acotado
+    assert (fv.WACC_MIN, fv.WACC_MAX, fv.RF_DEFECTO, fv.ERP_DEFECTO) == (0.08, 0.115, 0.0425, 0.045)
+    # beta 0.3 -> Blume 2/3*0.3 + 1/3 = 0.5333 ; ke = 0.04 + 0.5333*0.05 = 0.066667 < piso: WACC = 0.08 (piso Medio)
+    t = fv.calcular_tasas(ent(beta=0.3), Par(rf=0.04, erp=0.05))
+    assert t["beta"] == pytest.approx(0.5333333) and t["ke_capm"] == pytest.approx(0.04 + 0.5333333 * 0.05)
+    assert t["wacc"] == 0.08 and any("WACC" in x for x in t["topes_wacc"])
+    t2 = fv.calcular_tasas(ent(beta=0.7), Par(rf=0.03, erp=0.04))    # ke bajo el piso: WACC acotado
     assert t2["wacc"] == fv.WACC_MIN and any("WACC" in x for x in t2["topes_wacc"])
     assert fv.calcular_tasas(ent(beta=1.0), Par(rf=0.04, erp=0.05))["topes"] == []
 
@@ -215,8 +219,8 @@ def test_dcf_fcf_ciclico_se_normaliza_a_la_media_y_crece_a_g():
     e = ent(fcf_ltm=43.0, hist_fcf=hist)
     # base = media de los ultimos 5 = (59.6+37.8+32.8+23.8+43.0)/5 = 39.4 ; crecimiento = g -> Gordon exacto
     m = modelo(e, "dcf_5y_fcf", Par(wacc=0.10, g=0.02))
-    assert m["precio_estimado"] == pytest.approx(39.4 * 1.02 / 0.08 / 10, rel=1e-9) and m["ciclico"] is True
-    assert px(e, "dcf_10y_fcf", Par(wacc=0.10, g=0.02)) == pytest.approx(39.4 * 1.02 / 0.08 / 10, rel=1e-9)
+    assert m["precio_estimado"] == pytest.approx(39.4 * 1.02 / 0.08 / 10 * 1.1 ** 0.5, rel=1e-9) and m["ciclico"] is True
+    assert px(e, "dcf_10y_fcf", Par(wacc=0.10, g=0.02)) == pytest.approx(39.4 * 1.02 / 0.08 / 10 * 1.1 ** 0.5, rel=1e-9)
     sin_ciclo = ent(fcf_ltm=43.0, hist_fcf=[30.0, 33.0, 36.0, 39.0, 41.0, 43.0])
     assert modelo(sin_ciclo, "dcf_5y_fcf", Par(wacc=0.10, g=0.02))["ciclico"] is False
     s = fv.supuestos(e, Par(wacc=0.10, g=0.02))
@@ -247,18 +251,20 @@ def test_complementarias_mediana_submedias_y_promedio_igualando_familias():
     assert c["mediana"] == 100.0 and c["submedias"] == {"DCF": 110.0, "Múltiplos": 200.0, "Valor / Dividendos": 50.0}
     assert c["promedio_familias"] == pytest.approx((110 + 200 + 50) / 3) and c["n_por_grupo"]["DCF"] == 2
     assert c["upside_mediana"] == pytest.approx(0.0) and c["upside_promedio_familias"] == pytest.approx(20.0)
-    assert agg["fair_value"] == pytest.approx(104.0)        # el consolidado NO cambia: promedio simple (520/5)
+    # el consolidado ES el promedio igualando familias (110+200+50)/3 = 120; el promedio simple (520/5 = 104) es informativo
+    assert agg["fair_value"] == pytest.approx(120.0) and agg["promedio_simple"] == pytest.approx(104.0)
+    assert c["promedio_simple"] == pytest.approx(104.0)
     assert fv.complementarias({"modelos_usados": []}, lista) is None
 
 
 # ================================================================ B2: DCF inverso
 def test_dcf_inverso_encuentra_el_wacc_que_iguala_el_precio():
-    e = ent(fcf_ltm=100.0)       # sin historia: crecimiento = g ; valor = 100*(1+g)/(w-g)/10
+    e = ent(fcf_ltm=100.0)       # sin historia: crecimiento = g ; valor = 100*(1+g)/(w-g)*(1+w)^0.5/10 (mitad de anio)
     p = Par(wacc=0.09, g=0.02)
-    di = fv.dcf_inverso(e, p, precio=127.5)           # (102/(w-0.02))/10 = 127.5 -> w = 0.10
+    di = fv.dcf_inverso(e, p, precio=102 * 1.10 ** 0.5 / 0.08 / 10)     # el precio que da exactamente w = 0.10
     assert di["wacc_implicito"] == pytest.approx(0.10, abs=1e-6) and di["wacc_usado"] == 0.09
-    assert di["valor_con_supuestos"] == pytest.approx(102 / 0.07 / 10)
-    assert fv.dcf_inverso(e, p, precio=170.0)["wacc_implicito"] == pytest.approx(0.08, abs=1e-6)
+    assert di["valor_con_supuestos"] == pytest.approx(102 * 1.09 ** 0.5 / 0.07 / 10)
+    assert fv.dcf_inverso(e, p, precio=102 * 1.08 ** 0.5 / 0.06 / 10)["wacc_implicito"] == pytest.approx(0.08, abs=1e-6)
     assert fv.dcf_inverso(e, p, precio=1e9)["wacc_implicito"] is None and fv.dcf_inverso(e, p, precio=1e-9)["wacc_implicito"] is None
 
 
@@ -281,14 +287,14 @@ def test_dcf_inverso_solo_para_dcf_de_fcf_y_sin_datos():
 
 # ================================================================ B3: topes activos
 def test_topes_activos_en_supuestos_y_en_los_modelos():
-    e = ent(eps_ltm=2.0, fcf_ltm=100.0, ingresos_ltm=500.0, beta=0.3,
+    e = ent(eps_ltm=2.0, fcf_ltm=1000.0, ingresos_ltm=500.0, beta=5.0,
             multiplos_hist={"pe": [50.0, 52.0, 48.0, 51.0]},
-            hist_fcf=[10.0, 20.0, 40.0, 80.0, 100.0], hist_ingresos=[20.0, 40.0, 60.0, 100.0, 150.0])
+            hist_fcf=[10.0, 40.0, 160.0, 640.0, 1000.0], hist_ingresos=[20.0, 40.0, 60.0, 100.0, 150.0])
     s = fv.supuestos(e, Par(wacc=0.10, g=0.02))
     t = " | ".join(s["topes_activos"])
     assert "P/E objetivo: mediana histórica 50.5x topada a 35x" in t
-    assert "FCF: crecimiento inicial" in t and "topado a 15 %" in t
-    assert "margen FCF objetivo" in t and "beta 0.30 acotada a 0.70" in t
+    assert "FCF: crecimiento etapa 1" in t and "topado a 42 %" in t      # variaciones +100 % -> 65 % -> tope Medio 42 %
+    assert "margen FCF objetivo" in t and "beta 5.00 acotada a 4.00" in t
     pe = modelo(e, "pe")
     assert pe["tope_activo"] is True and "topada a 35x" in pe["topes"][0]
     assert modelo(e, "dcf_5y_fcf", Par(wacc=0.10, g=0.02))["tope_activo"] is True
@@ -299,7 +305,7 @@ def test_topes_activos_en_supuestos_y_en_los_modelos():
 
 
 def test_tope_de_lynch_y_ddm_con_beta_acotada():
-    e = ent(eps_ltm=2.0, hist_eps=[1.0, 10.0], dividendo_anual=3.0, beta=0.3)
+    e = ent(eps_ltm=2.0, hist_eps=[1.0, 10.0], dividendo_anual=3.0, beta=5.0)
     assert modelo(e, "lynch")["tope_activo"] is True
     assert modelo(e, "ddm")["tope_activo"] is True and "beta" in modelo(e, "ddm")["topes"][0]
 
@@ -315,12 +321,13 @@ def test_nota_de_soporte_y_etiqueta():
 
 def test_linea_del_grafico_indica_soporte_debil(df_sintetico):
     px_ = float(df_sintetico["Close"].iloc[-1])
-    fig = ui_mod.construir_figura(df_sintetico, "T", [], px_, valor_justo={
+    datos = ui_mod.datos_grafico(df_sintetico, "T")
+    debil = ui_mod.overlays_grafico(datos, "T", [], px_, valor_justo={
         "fair_value": px_ * 1.2, "upside_pct": 20.0, "incertidumbre": "Alta", "n_usados": 8})
-    assert any(a.text and a.text.endswith("· incert. Alta") for a in fig.layout.annotations)
-    fuerte = ui_mod.construir_figura(df_sintetico, "T", [], px_, valor_justo={
+    assert debil["vj"]["etiqueta"].endswith(" · incert. Alta")
+    fuerte = ui_mod.overlays_grafico(datos, "T", [], px_, valor_justo={
         "fair_value": px_ * 1.2, "upside_pct": 20.0, "incertidumbre": "Media", "n_usados": 8})
-    assert not any(a.text and "·" in a.text for a in fuerte.layout.annotations)
+    assert "·" not in fuerte["vj"]["etiqueta"]
 
 
 def test_ranking_marca_el_upside_con_poco_soporte():
@@ -348,15 +355,15 @@ def test_wacc_del_usuario_mueve_ke_dividido_por_el_peso_del_patrimonio():
 # ================================================================ UI: bloques nuevos
 def test_vista_muestra_complementarias_dcf_inverso_topes_y_notas(cliente, vista):
     textos = _textos(cliente)
-    comp = next(t for t in textos if t.startswith("Información complementaria"))
-    assert "Mediana $" in comp and "Promedio igualando familias $" in comp and "DCF $" in comp and "Múltiplos $" in comp
+    comp = next(t for t in textos if t.startswith("Complementarias del Escenario Medio"))
+    assert "Mediana $" in comp and "Promedio simple $" in comp and "DCF $" in comp and "Múltiplos $" in comp
+    assert "iguala el peso de las familias" in comp
     assert any("no son independientes" in t for t in textos)
     assert any(t.startswith("DCF inverso") for t in textos)
-    assert any("se mantienen al cambiar de ticker" in t and "Seleccionar todos" in t for t in textos)
+    assert any("se mantienen al cambiar de ticker" in t and "«Todos»" in t for t in textos)
     assert any("Solo DCF" in t and "visiones distintas" in t for t in textos)
     assert all(f["tope"].text == "" or f["tope"].text.startswith("tope activo: ") for f in vista.vj_rows.values())
     vista.vj_params = vista.vj_params.con(wacc=0.12)
-    vista.vj_modelos_cache = None
     vista._vj_actualizar()
     assert any("WACC implícito" in t for t in _textos(cliente))
 
@@ -385,7 +392,7 @@ def test_seccion_modelo_textos_corregidos():
     txt = ui_mod.texto_seccion(next(s for s in ui_mod.contenido_modelo() if s["id"] == "valor_justo"))
     assert "NO son «conservadoras»" in txt.replace("**", "") or "NO son «conservadoras»" in txt
     for clave in ("no son independientes", "Ciclos y commodities", "REITs y utilities", "SBC", "arrendamientos",
-                  "tope activo", "fin de año", "Poco soporte", "Otros DCF del proyecto", "ve algo distinto",
+                  "tope activo", "mitad de año", "Poco soporte", "Otros DCF del proyecto", "visiones distintas",
                   "promedio que iguala el peso de cada familia"):
         assert clave.lower() in txt.lower(), clave
     assert str(int(fv.GRAHAM_PB_MAX)) in txt and str(fv.MIN_ANIOS_FCF) in txt

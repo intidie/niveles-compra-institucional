@@ -9,11 +9,16 @@ import pytest
 import app_ui as ui_mod
 from src.levels import fair_value as fv
 from src.levels.fair_value import ParametrosValoracion as Par
-from test_fair_value import (_anot_fair, _df_precios, _entradas_ricas, _facts_falsos, cliente, ent,  # noqa: F401
-                             modelo, vista)
+from test_fair_value import (_anot_fair, _df_precios, _entradas_ricas, _facts_falsos, _sin_red_ni_disco, cliente,  # noqa: F401
+                             ent, modelo, vista)
 
 
 # ============================================================================== UI
+def _dos(v):
+    """Texto de la fila de un modelo igual en ambos escenarios (Graham no depende del escenario)."""
+    return f"Medio ${v:,.2f} · Pesimista ${v:,.2f}"
+
+
 def test_cambio_de_ticker_con_interruptor_activo_repinta_la_pestana(vista, df_sintetico, monkeypatch):
     vista.sw_vj.value = True
     otra = _entradas_ricas()
@@ -24,7 +29,7 @@ def test_cambio_de_ticker_con_interruptor_activo_repinta_la_pestana(vista, df_si
     vista.refrescar()
     assert vista.vj_entradas.ticker == "OTRA" and vista.vj_kpi["precio"].text == "$80.00"
     assert vista.vj_kpi["fair"].text == f"${vista.vj_agg['fair_value']:,.2f}"
-    assert vista.vj_rows["graham"]["precio"].text == f"${math.sqrt(22.5 * 9.0 * 25.0):,.2f}"
+    assert vista.vj_rows["graham"]["precio"].text == _dos(math.sqrt(22.5 * 9.0 * 25.0))
     assert _anot_fair(vista) and f"${vista.vj_agg['fair_value']:,.2f}" in _anot_fair(vista)[0]
 
 
@@ -35,7 +40,7 @@ def test_recalcular_con_interruptor_activo_repinta_la_pestana(vista):
     ent_nueva.eps_ltm = 12.0
     ui_mod.CACHE["RICA"] = {**nuevo, "entradas_valoracion": ent_nueva.to_dict()}   # como un nuevo Recalcular
     vista.refrescar()
-    assert vista.vj_rows["graham"]["precio"].text == f"${math.sqrt(22.5 * 12.0 * 25.0):,.2f}"
+    assert vista.vj_rows["graham"]["precio"].text == _dos(math.sqrt(22.5 * 12.0 * 25.0))
 
 
 def test_init_sin_ticker_los_sliders_coinciden_con_los_parametros(cliente):
@@ -45,7 +50,7 @@ def test_init_sin_ticker_los_sliders_coinciden_con_los_parametros(cliente):
     assert v.vj_sl["g"].value == round(fv.CRECIMIENTO_TERMINAL_DEFECTO * 100, 1)
     assert v.vj_sl["mos"].value == round(fv.MARGEN_SEGURIDAD_DEFECTO * 100)
     assert 4.0 < v.vj_sl["wacc"].value < 16.0
-    assert "2,5 %" in v.vj_sl_lbl["g"].text and "25 %" in v.vj_sl_lbl["mos"].text
+    assert "3,5 %" in v.vj_sl_lbl["g"].text and "25 %" in v.vj_sl_lbl["mos"].text
     assert v.vj_params == fv.ParametrosValoracion()
 
 
@@ -87,8 +92,8 @@ def test_expulsion_del_lru_no_pierde_las_entradas_del_ticker_activo(vista):
 
 def test_mover_controles_con_el_interruptor_apagado_no_reconstruye_el_grafico_de_analisis(vista, monkeypatch):
     llamadas = []
-    orig = ui_mod.construir_figura
-    monkeypatch.setattr(ui_mod, "construir_figura", lambda *a, **k: llamadas.append(1) or orig(*a, **k))
+    orig = ui_mod.overlays_grafico
+    monkeypatch.setattr(ui_mod, "overlays_grafico", lambda *a, **k: llamadas.append(1) or orig(*a, **k))
     assert vista.sw_vj.value is False
     vista.vj_sl["wacc"].value = 11.0
     vista.vj_rows["pe"]["chk"].value = False
@@ -111,18 +116,18 @@ def test_texto_de_outliers_describe_el_comportamiento_real():
 
 def test_valor_justo_absurdo_no_deforma_el_eje_del_grafico(df_sintetico):
     px_ = float(df_sintetico["Close"].iloc[-1])
-    ref = ui_mod.construir_figura(df_sintetico, "T", [], px_)
-    fig = ui_mod.construir_figura(df_sintetico, "T", [], px_, valor_justo={"fair_value": px_ * 35.0, "upside_pct": 3400.0})
-    assert list(fig.layout.yaxis.range) == pytest.approx(list(ref.layout.yaxis.range))
-    nota = [a for a in fig.layout.annotations if "Fair Value" in (a.text or "")]
-    assert len(nota) == 1 and "fuera de rango" in nota[0].text and "▲" in nota[0].text
-    assert not [s for s in fig.layout.shapes if s.line.color == ui_mod.COLOR_FAIR_VALUE]
-    bajo = ui_mod.construir_figura(df_sintetico, "T", [], px_, valor_justo={"fair_value": px_ * 0.1, "upside_pct": -90.0})
-    assert "▼" in [a.text for a in bajo.layout.annotations if "Fair Value" in (a.text or "")][0]
+    datos = ui_mod.datos_grafico(df_sintetico, "T")
+    ref = ui_mod.overlays_grafico(datos, "T", [], px_)
+    arriba = ui_mod.overlays_grafico(datos, "T", [], px_, valor_justo={"fair_value": px_ * 35.0, "upside_pct": 3400.0})
+    assert arriba["extras"] == ref["extras"]                                  # la escala no incluye el valor absurdo
+    vj = arriba["vj"]
+    assert vj["fuera_de_rango"] == "arriba" and "fuera de rango" in vj["etiqueta"] and "▲" in vj["etiqueta"]
+    bajo = ui_mod.overlays_grafico(datos, "T", [], px_, valor_justo={"fair_value": px_ * 0.1, "upside_pct": -90.0})
+    assert bajo["vj"]["fuera_de_rango"] == "abajo" and "▼" in bajo["vj"]["etiqueta"]
     lo, hi = ui_mod.VJ_RANGO_EJE
-    dentro = ui_mod.construir_figura(df_sintetico, "T", [], px_, valor_justo={"fair_value": px_ * hi, "upside_pct": 200.0})
-    assert [s for s in dentro.layout.shapes if s.line.color == ui_mod.COLOR_FAIR_VALUE]    # en el borde: se dibuja
-    assert dentro.layout.yaxis.range[1] >= px_ * hi
+    dentro = ui_mod.overlays_grafico(datos, "T", [], px_, valor_justo={"fair_value": px_ * hi, "upside_pct": 200.0})
+    assert dentro["vj"]["fuera_de_rango"] is None                            # en el borde: se dibuja
+    assert max(dentro["extras"]) >= px_ * hi - 1e-3
 
 
 # ============================================================================== monedas y datos por accion
@@ -201,23 +206,23 @@ def test_eps_inconsistente_con_el_precio_se_descarta():
 
 # ============================================================================== diferencia minima WACC - g
 @pytest.mark.parametrize("wacc, g", [(0.05, 0.0499), (0.10, 0.095), (0.0599, 0.05)])
-def test_dcf_epv_exigen_un_punto_de_diferencia(wacc, g):
+def test_dcf_epv_exigen_dos_puntos_y_medio_de_diferencia(wacc, g):
     e = ent(fcf_ltm=100.0, ebitda_ltm=200.0, da_ltm=40.0, capex_ltm=40.0, ingresos_ltm=1000.0, ebit_ltm=100.0)
     ms = {m["id"]: m for m in fv.calcular_modelos(e, Par(wacc=wacc, g=g))}
     for i in [k for k in ms if k.startswith("dcf_")] + ["epv"]:
-        assert not ms[i]["aplicable"] and "diferencia WACC-g < 1 pp" in ms[i]["motivo_exclusion"], i
-    assert fv.DIF_MIN_WACC_G == 0.01
+        assert not ms[i]["aplicable"] and "diferencia WACC-g < 2.5 pp" in ms[i]["motivo_exclusion"], i
+    assert fv.DIF_MIN_WACC_G == 0.025
 
 
-def test_ddm_exige_un_punto_entre_ke_y_g():
+def test_ddm_exige_dos_puntos_y_medio_entre_ke_y_g():
     e = ent(dividendo_anual=3.0, beta=1.0)   # ke = 0.04 + 0.05 = 0.09
-    assert "diferencia ke-g < 1 pp" in modelo(e, "ddm", Par(rf=0.04, erp=0.05, g=0.085))["motivo_exclusion"]
-    assert modelo(e, "ddm", Par(rf=0.04, erp=0.05, g=0.08))["aplicable"]
+    assert "diferencia ke-g < 2.5 pp" in modelo(e, "ddm", Par(rf=0.04, erp=0.05, g=0.07))["motivo_exclusion"]
+    assert modelo(e, "ddm", Par(rf=0.04, erp=0.05, g=0.06))["aplicable"]
 
 
-def test_exactamente_un_punto_si_aplica():
+def test_exactamente_dos_puntos_y_medio_si_aplica():
     e = ent(fcf_ltm=100.0, ebit_ltm=100.0)
-    p = Par(wacc=0.10, g=0.09)
+    p = Par(wacc=0.10, g=0.075)
     assert modelo(e, "dcf_5y_fcf", p)["aplicable"] and modelo(e, "epv", p)["aplicable"]
 
 
@@ -272,9 +277,10 @@ def test_historias_anuales_y_ltm_son_exactos_con_series_crecientes():
     f, cierres = _facts_crecientes()
     e = fv.extraer_entradas("T", None, _df_rampa(), {}, facts=f)
     n = len(cierres)
-    esperado_rev = [_suma(lambda i: 100.0 * (i + 1), n, k) for k in range(5, -1, -1)]
-    esperado_fcf = [_suma(lambda i: 30.0 * (i + 1) - 5.0, n, k) for k in range(5, -1, -1)]
-    esperado_eps = [_suma(lambda i: 0.1 * (i + 1), n, k) for k in range(5, -1, -1)]
+    # 28 trimestres = 7 ejercicios LTM (k = 6 ... 0) en modo local (hasta 10 anios + TTM)
+    esperado_rev = [_suma(lambda i: 100.0 * (i + 1), n, k) for k in range(6, -1, -1)]
+    esperado_fcf = [_suma(lambda i: 30.0 * (i + 1) - 5.0, n, k) for k in range(6, -1, -1)]
+    esperado_eps = [_suma(lambda i: 0.1 * (i + 1), n, k) for k in range(6, -1, -1)]
     assert e.hist_ingresos == pytest.approx(esperado_rev, rel=1e-12)
     assert e.hist_fcf == pytest.approx(esperado_fcf, rel=1e-12)
     assert e.hist_eps == pytest.approx(esperado_eps, rel=1e-12)
@@ -289,7 +295,7 @@ def test_multiplos_historicos_exactos_y_sin_lookahead():
     n = len(cierres)
     px_ = df["Close"]
     pe, pfcf, pb = [], [], []
-    for k in range(fv.ANIOS_HISTORIA, 0, -1):
+    for k in range(6, 0, -1):     # hasta 6 anios atras con 28 trimestres de datos
         fecha = cierres[n - 1 - 4 * k] + pd.Timedelta(days=fv.REZAGO_PUBLICACION_DIAS)
         precio = float(px_[px_.index <= fecha].iloc[-1])                 # ultimo precio CONOCIDO (<= cierre + rezago)
         pe.append(precio / _suma(lambda i: 0.1 * (i + 1), n, k))

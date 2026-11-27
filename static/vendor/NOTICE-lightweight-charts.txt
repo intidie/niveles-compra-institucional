@@ -1,0 +1,14 @@
+TradingView Lightweight Charts(TM) v5.3.0
+Copyright (c) 2026 TradingView, Inc.
+https://www.tradingview.com/
+https://github.com/tradingview/lightweight-charts
+
+Licensed under the Apache License, Version 2.0 (see LICENSE-lightweight-charts.txt in this directory).
+
+Este programa incorpora, sin modificarla, la build standalone de produccion
+(lightweight-charts.standalone.production.js, obtenida del paquete npm "lightweight-charts" 5.3.0,
+sha1 del tarball f4a90dca971cf0727f9bbaceb1e5090cb3b5b4c9). Se sirve localmente (sin CDN) para funcionar sin red.
+
+Atribucion: segun el aviso de TradingView para esta libreria, la aplicacion que la usa debe mostrar la atribucion
+a TradingView con un enlace a https://www.tradingview.com/ . Aqui se cumple con el logo de atribucion integrado de la
+libreria (opcion layout.attributionLogo, activa) y con una nota discreta bajo el grafico de la pestana Analisis.

@@ -30,7 +30,8 @@ def _todas():
 
 
 def test_import_expone_funciones_puras():
-    assert callable(ui_mod.construir_figura) and callable(ui_mod.filtrar_zonas)
+    assert callable(ui_mod.datos_grafico) and callable(ui_mod.overlays_grafico) and callable(ui_mod.filtrar_zonas)
+    assert not hasattr(ui_mod, "construir_figura")  # Analisis ya no usa Plotly
 
 
 def test_mapeo_familias_alineado_con_backtest():
@@ -153,51 +154,6 @@ def _r13f(df):
                          "acciones": [10.0, 5.0], "acciones_previas": [5.0, 8.0], "cambio_pct": [100.0, -37.5]})
 
 
-def _nombres(fig):
-    return [t.name for t in fig.data]
-
-
-def test_figura_completa(df_sintetico):
-    z = ui_mod.filtrar_zonas(_zonas_ricas(), _todas(), [], 1000.0)
-    av = [{"tipo": "DCF_MOS30", "familia": "valoracion", "precio": float(df_sintetico["Close"].iloc[-1])}]
-    fig = ui_mod.construir_figura(df_sintetico, "TEST", z, None, _form4(df_sintetico), _r13f(df_sintetico), av, 1)
-    nombres = _nombres(fig)
-    assert any(n and n.startswith("Compra insider Form 4") for n in nombres)
-    assert any(n and n.startswith("Acumulacion 13F") for n in nombres)
-    assert fig.data[0].type == "candlestick"
-    assert any(t.type == "bar" and t.orientation == "h" for t in fig.data)
-    assert fig.layout.xaxis.rangeslider.visible is False
-    assert fig.layout.hovermode == "x unified"
-    assert fig.layout.yaxis2.matches == "y"  # eje Y compartido
-    assert fig.layout.xaxis.domain[1] > 0.7 and fig.layout.xaxis2.domain[0] > 0.7  # ~75/25
-    # 3 bandas en el panel de precio; la seleccionada (N1) es la mas opaca
-    ops = sorted(s.opacity for s in fig.layout.shapes if s.type == "rect" and s.yref == "y" and s.xref == "x domain")
-    assert len(ops) == 3 and ops[-1] == pytest.approx(0.42)
-    fig.to_json()
-
-
-def test_figura_sin_marcadores_ni_zonas(df_sintetico):
-    fig = ui_mod.construir_figura(df_sintetico, "TEST", [], None, None, None, None, None)
-    assert fig.data[0].type == "candlestick"
-    assert not any(n and ("Form 4" in n or "13F" in n) for n in _nombres(fig))
-    fig2 = ui_mod.construir_figura(df_sintetico, "TEST", None, None, pd.DataFrame(), pd.DataFrame())
-    assert fig2.data[0].type == "candlestick"
-
-
-def test_figura_sin_datos():
-    for d in (None, pd.DataFrame(), pd.DataFrame({"Close": [1.0]})):
-        fig = ui_mod.construir_figura(d, "X", [], None)
-        assert len(fig.data) == 0 and fig.layout.annotations
-        fig.to_json()
-
-
-def test_figura_indice_con_zona_horaria(df_sintetico):
-    d = df_sintetico.copy()
-    d.index = d.index.tz_localize("America/New_York")
-    fig = ui_mod.construir_figura(d, "TZ", [], None, _form4(df_sintetico), None)
-    assert fig.data[0].type == "candlestick" and len(fig.data[0].x) == len(d)
-
-
 # =====================================================================================================
 # Modo oscuro: paleta, contraste WCAG, Plotly (hoverlabel/modebar/leyenda/anotaciones), CSS y colores Quasar
 # =====================================================================================================
@@ -264,7 +220,8 @@ def test_paleta_contraste_estados_y_superposiciones():
         assert contraste(m.ACENTO_TXT, sup, base=m.BG_POPUP) >= 4.5
     assert contraste(m.BLANCO, m.BG_ETIQUETA, base=m.BG_PANEL) >= 4.5       # etiquetas de bandas
     assert contraste(m.COLOR_VALORACION, m.BG_ETIQUETA, base=m.BG_PANEL) >= 4.5
-    assert contraste(m.MUTED, m.BG_MODEBAR, base=m.BG_PAPEL) >= 4.5         # iconos de la modebar
+    for banda in (m.VJ_CIAN, m.VJ_MAGENTA, m.VJ_PESIMISTA):                  # bandas / piso del grafico historico
+        assert contraste(banda, m.BG_PANEL) >= 3.0, banda
 
 
 def test_colores_quasar_contraste():
@@ -276,9 +233,12 @@ def test_colores_quasar_contraste():
     assert contraste(ui_mod.TXT_SOBRE_AVISO, q["warning"]) >= 4.5
 
 
-def test_paleta_publica_y_papel_plotly_opaco():
-    assert {"BG_PAPEL", "BG_PANEL", "TXT", "MUTED", "GRILLA"} <= set(ui_mod.PALETA)
-    assert _rgba(ui_mod.BG_PAPEL)[3] == 1.0, "papel transparente => hover/modebar de Plotly calculados sobre blanco"
+def test_paleta_publica_sin_restos_de_plotly():
+    assert {"BG_PAPEL", "BG_PANEL", "TXT", "MUTED", "GRILLA", "VJ_CIAN", "VJ_MAGENTA", "VJ_PESIMISTA"} <= set(ui_mod.PALETA)
+    assert _rgba(ui_mod.BG_PAPEL)[3] == 1.0
+    assert not {"BG_MODEBAR", "TRANSPARENTE"} & set(ui_mod.PALETA)
+    for nombre in ("_hoverlabel", "_layout_tema", "_figura_vacia", "construir_figura_valor_justo", "go"):
+        assert not hasattr(ui_mod, nombre), nombre
 
 
 def test_css_tema_usa_la_paleta():
@@ -312,103 +272,19 @@ def test_modo_oscuro_forzado_en_ui_run():
     assert "dark=True" in src and "ui.dark_mode(True)" in src and "ui.colors(**COLORES_QUASAR)" in src
 
 
-def _hojas(obj, ruta=()):
-    """Hojas (ruta, valor) de dicts anidados y listas de dicts; ignora arrays de datos."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from _hojas(v, ruta + (k,))
-    elif isinstance(obj, (list, tuple)):
-        for i, v in enumerate(obj):
-            if isinstance(v, (dict, list, tuple)):
-                yield from _hojas(v, ruta + (i,))
-    else:
-        yield ruta, obj
+def test_graficos_echarts_usan_tema_oscuro_explicito():
+    """La pestana Valor Justo usa Apache ECharts: fondo, tooltip, ejes y leyenda salen de la paleta oscura."""
+    for opc in (ui_mod.opciones_historico(None, None, "x"), ui_mod.opciones_barras(None, None, None, "x")):
+        assert opc["backgroundColor"] == ui_mod.BG_PANEL and opc["animation"] is False
+        tt = opc["tooltip"]
+        assert tt["backgroundColor"] == ui_mod.BG_POPUP and tt["borderColor"] == ui_mod.BORDE
+        assert contraste(tt["textStyle"]["color"], tt["backgroundColor"]) >= 4.5
+        assert contraste(opc["title"]["textStyle"]["color"], ui_mod.BG_PANEL) >= 4.5
+        assert contraste(opc["legend"]["textStyle"]["color"], ui_mod.BG_PANEL) >= 4.5
+        assert contraste(opc["xAxis"]["axisLabel"]["color"], ui_mod.BG_PANEL) >= 4.5
 
 
-def _figura_rica(df):
-    z = ui_mod.filtrar_zonas(_zonas_ricas(), _todas(), [], 1000.0)
-    av = [{"tipo": "DCF_MoS30", "familia": "valoracion", "precio": float(df["Close"].iloc[-1])}]
-    return ui_mod.construir_figura(df, "TEST", z, None, _form4(df), _r13f(df), av, 1, "sub")
-
-
-def test_figura_hoverlabel_oscuro_explicito(df_sintetico):
-    for fig in (_figura_rica(df_sintetico), ui_mod.construir_figura(None, "X")):
-        hl = fig.layout.hoverlabel
-        assert hl.bgcolor == ui_mod.BG_POPUP and hl.font.color == ui_mod.TXT and hl.bordercolor == ui_mod.BORDE
-        assert contraste(hl.font.color, hl.bgcolor) >= 4.5
-        assert hl.namelength == -1  # nombres largos de traza (Form 4 / 13F) sin truncar
-        assert fig.layout.paper_bgcolor == ui_mod.BG_PAPEL and fig.layout.plot_bgcolor == ui_mod.BG_PANEL
-
-
-def test_figura_cada_traza_con_hoverlabel_oscuro(df_sintetico):
-    fig = _figura_rica(df_sintetico)
-    tipos = {t.type for t in fig.data}
-    assert {"candlestick", "scatter", "bar"} <= tipos
-    assert len(fig.data) >= 6  # velas, SMA, 13F, Form 4, valoracion, Volume Profile
-    for t in fig.data:
-        assert t.hoverlabel.bgcolor == ui_mod.BG_POPUP, t.name
-        assert t.hoverlabel.font.color == ui_mod.TXT, t.name
-        assert contraste(t.hoverlabel.font.color, t.hoverlabel.bgcolor) >= 4.5
-    assert fig.layout.hovermode == "x unified"
-    assert fig.data[0].yhoverformat == ",.2f"  # el '$' ya lo pone tickprefix (evita '$$214.75' en el popup)
-    assert fig.layout.yaxis.tickprefix == "$"
-
-
-def test_figura_json_sin_fondos_claros_ni_fuentes_ilegibles(df_sintetico):
-    """Recorre TODO el JSON de la figura (sin la plantilla): ningun bgcolor claro, ninguna fuente de bajo contraste."""
-    for fig in (_figura_rica(df_sintetico), ui_mod.construir_figura(None, "X", [], None)):
-        j = json.loads(fig.to_json())
-        j["layout"].pop("template", None)
-        n_bg = n_font = 0
-        for ruta, v in _hojas(j):
-            if not isinstance(v, str):
-                continue
-            if ruta[-1] == "bgcolor":
-                n_bg += 1
-                assert contraste(ui_mod.TXT, v, base=ui_mod.BG_PANEL) >= 4.5, (ruta, v)
-            if ruta[-1] == "color" and any("font" in str(r).lower() for r in ruta[-3:-1]):
-                n_font += 1
-                assert contraste(v, ui_mod.BG_PANEL) >= 4.5 and contraste(v, ui_mod.BG_PAPEL) >= 4.5, (ruta, v)
-        assert n_bg >= 3 and n_font >= 4
-
-
-def test_figura_titulo_sin_ticker_no_muestra_guion_suelto():
-    assert ui_mod.construir_figura(None, "-").layout.title.text == "Mapa de niveles institucionales"
-    assert ui_mod.construir_figura(None, "AAPL").layout.title.text == "AAPL - Mapa de niveles institucionales"
-
-
-def test_figura_anotaciones_legibles(df_sintetico):
-    fig = _figura_rica(df_sintetico)
-    anots = list(fig.layout.annotations)
-    assert len(anots) >= 4  # 3 bandas + linea de valoracion
-    for a in anots:
-        fondo = a.bgcolor or ui_mod.BG_PANEL
-        assert contraste(a.font.color, fondo, base=ui_mod.BG_PANEL) >= 4.5, a.text
-    vacia = ui_mod.construir_figura(None, "X")
-    assert contraste(vacia.layout.annotations[0].font.color, ui_mod.BG_PANEL) >= 4.5
-
-
-def test_figura_modebar_leyenda_titulo_y_ejes(df_sintetico):
-    for fig in (_figura_rica(df_sintetico), ui_mod.construir_figura(None, "X")):
-        mb = fig.layout.modebar
-        assert contraste(mb.color, ui_mod.BG_PAPEL) >= 4.5 and contraste(mb.activecolor, ui_mod.BG_PAPEL) >= 4.5
-        assert contraste(ui_mod.TXT, mb.bgcolor, base=ui_mod.BG_PAPEL) >= 4.5
-        assert fig.layout.legend.font.color == ui_mod.TXT
-        assert fig.layout.font.color == ui_mod.TXT
-        assert fig.layout.title.font.color == ui_mod.TXT
-    fig = _figura_rica(df_sintetico)
-    assert fig.layout.xaxis.tickfont.color == ui_mod.TXT and fig.layout.yaxis.tickfont.color == ui_mod.TXT
-    assert fig.layout.xaxis.showspikes is True
-
-
-def test_figura_colores_de_series_vienen_de_la_paleta(df_sintetico):
-    fig = _figura_rica(df_sintetico)
-    f4 = next(t for t in fig.data if t.name and t.name.startswith("Compra insider"))
-    q13 = next(t for t in fig.data if t.name and t.name.startswith("Acumulacion 13F"))
-    assert f4.marker.color == ui_mod.COLOR_FORM4 and q13.marker.color == ui_mod.COLOR_13F
-    assert fig.data[0].increasing.line.color == ui_mod.VELA_ALZA
-    barras = next(t for t in fig.data if t.type == "bar")
-    assert set(barras.marker.color) <= {ui_mod.COLOR_HVN, ui_mod.COLOR_BARRA_VP}
+def test_barras_del_perfil_visibles_sobre_el_panel():
     assert contraste(ui_mod.COLOR_BARRA_VP, ui_mod.BG_PANEL) >= 1.5  # barras no-HVN visibles sobre el panel (grafico)
 
 
@@ -453,7 +329,7 @@ def test_vista_construye_tabs_ayudas_y_tema_oscuro(cliente):
     assert col.props["dark-page"] == ui_mod.BG_PAGINA and col.props["primary"] == ui_mod.COLORES_QUASAR["primary"]
     assert "color-scheme" in cliente._head_html and ui_mod.BG_POPUP in cliente._head_html
     assert not [e for e in els if isinstance(e, ui.table) and "dark" not in e.props]
-    assert len([e for e in els if isinstance(e, ui.expansion)]) == 10  # pestaña Modelo
+    assert len([e for e in els if isinstance(e, ui.expansion)]) == 10 + 6  # pestaña Modelo + 6 acordeones de Valor Justo
 
 
 def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch):
@@ -466,7 +342,8 @@ def test_vista_refresca_con_datos_sinteticos(cliente, df_sintetico, monkeypatch)
     assert v.tarj["precio"].text == "$100.00" and v.tarj["confiabilidad"].text == "40.0/100"
     assert v.tarj_cob.text == "cobertura 80 %"
     assert len(v.tabla.rows) == 3
-    assert v.grafico.figure.layout.hoverlabel.bgcolor == ui_mod.BG_POPUP
+    assert v.grafico_datos["c"][-1] > 0 and len(v.grafico_overlays["zonas"]) == 3
+    assert v.grafico_overlays["titulo"].startswith("TEST - Mapa de niveles")
     v.ticker = None
     v.refrescar()
     assert v.tarj_cob.text == ""
@@ -790,8 +667,7 @@ def test_distancia_unica_a_r_sup_en_tabla_ranking_y_figura(df_sintetico):
     assert [f["dist_pct"] for f in ui_mod.filas_tabla(zonas, None, px)] == pytest.approx(esperado)
     rk = ui_mod.filas_ranking([{"ticker": "A", "precio_actual": px, "zonas": zonas, "score_ranking": 1.0}])[0][0]
     assert rk["dist_pct"] == pytest.approx(esperado[0])
-    fig = ui_mod.construir_figura(df_sintetico, "TEST", zonas, px)
-    etiquetas = [a.text for a in fig.layout.annotations if a.text.startswith("N")]
+    etiquetas = [b["etiqueta"] for b in ui_mod.bandas_zonas(zonas, px)]
     assert len(etiquetas) == 3
     for z, e in zip(zonas, etiquetas):
         assert ui_mod.ETIQUETA_DIST_RSUP in e and f"{(z['r_sup'] / px - 1) * 100:+.1f}%" in e

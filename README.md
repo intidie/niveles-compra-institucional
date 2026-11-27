@@ -24,12 +24,33 @@ Abre la aplicación y, en la pestaña **Análisis**, elige un ticker (por ejempl
 **Recalcular**. El botón de estrella guarda el ticker en **tu watchlist**; en la pestaña **Watchlist** el botón Escanear
 calcula solo las acciones de tu lista y las ordena por puntaje. La pestaña **Modelo** explica la metodología.
 
-La pestaña **Valor Justo** promedia 15 modelos de valoración (DCF a 5 y 10 años sobre FCF, EBITDA e ingresos; P/E,
-EV/EBITDA, EV/Ingresos, P/B, P/FCF; DDM; EPV; Graham; Lynch) con los estados financieros de SEC EDGAR, muestra la
-incertidumbre (cuánto discrepan los modelos) y permite activar o desactivar modelos y mover WACC, g y el margen de
-seguridad sin volver a consultar nada. El interruptor **Mostrar Valor Justo** del panel lateral dibuja esa línea en el
-gráfico de Análisis. Es una implementación propia «estilo InvestingPro» (su metodología es propietaria y no se replica):
-un valor estimado con supuestos, no un precio objetivo, y es independiente de los niveles técnicos de compra.
+La pestaña **Valor Justo** calcula 15 modelos de valoración (DCF a 5 y 10 años sobre FCF, EBITDA e ingresos; P/E,
+EV/EBITDA, EV/Ingresos, P/B, P/FCF; DDM; EPV; Graham; Lynch) con los estados financieros de SEC EDGAR, en **dos
+escenarios: Medio y Pesimista** (no hay optimista). Muestra 4 tarjetas (precio, valor justo Medio, piso fundamental
+Pesimista y diagnóstico de valoración con su incertidumbre), un gráfico histórico con bandas de ±10/20/30 % y, en
+acordeones, las barras por modelo, la activación de modelos y los sliders de WACC, g y margen de seguridad (se recalculan
+al instante, sin consultar nada). El interruptor **Mostrar Valor Justo** dibuja en Análisis solo la línea del Escenario
+Medio.
+
+Lectura honesta: ambos escenarios son **supuestos fijados de antemano, no predicciones**. Con el tope de crecimiento
+de 42 % durante 3 años, márgenes de hasta 55 % y g de 3,5 %, el Medio puede dar valores muy por encima del precio en
+negocios de hipercrecimiento (NVDA: Medio ~220 USD frente a ~149 USD de precio). El Pesimista es un estrés duro
+(WACC mínimo 12,5 %), no un «peor caso realista» (en KO queda ~61 % bajo el precio). La reconstrucción histórica es
+causal salvo el punto final (ancla); Rf, ERP, beta, sector y sliders no son point-in-time y la proyección a 12 meses es
+ilustrativa. Detalle y cifras en la pestaña **Modelo** (sección 10). Es una implementación propia «estilo InvestingPro»
+(su metodología es propietaria y no se replica): no es un precio objetivo y es independiente de los niveles técnicos.
+
+### Local vs presentación en Render
+
+| | Local (`python app_ui.py` o el .exe) | Presentación en Render (variable `PORT`) |
+|---|---|---|
+| Historial | 10 años (`periodo=10y`), serie de valor justo de 10 años | 3 años (`periodo=3y`), serie de 3 años |
+| Caché | SQLite en disco (entradas, `info`, ^TNX, serie) | Sin caché en disco; `gc.collect()` tras cada consulta |
+| Watchlist | Escaneo completo, secuencial | Un escaneo a la vez y máximo 5 tickers por escaneo |
+| Ventana | Nativa (pywebview) o navegador | Navegador |
+
+La nube es un visor ligero para presentar (512 MB); el uso serio es local. Los gráficos de Valor Justo usan Apache ECharts
+(incluido en NiceGUI) y el de Análisis TradingView Lightweight Charts: ambos se sirven sin CDN, funcionan sin conexión.
 
 ### Acceso directo en el Escritorio (Windows)
 

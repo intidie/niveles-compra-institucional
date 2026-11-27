@@ -20,6 +20,14 @@ from src.levels.fair_value import EntradasValoracion as Ent
 from src.levels.fair_value import ParametrosValoracion as Par
 
 TOL = 1e-9
+MA = 1.1 ** 0.5     # factor de mitad de anio con WACC = 10 %: (1+0.10)^0.5
+
+
+@pytest.fixture(autouse=True)
+def _sin_red_ni_disco(monkeypatch, tmp_path):
+    """Ningun test toca la red (^TNX) ni el directorio de datos real del usuario (cache SQLite)."""
+    monkeypatch.setenv("NIVELES_DATA_DIR", str(tmp_path / "datos"))
+    monkeypatch.setattr(fv, "obtener_rf", lambda *a, **k: None)
 
 
 def ent(**kw):
@@ -74,92 +82,111 @@ def test_sin_nan_ni_inf_en_ningun_modelo():
 
 # ============================================================================== formulas DCF
 def test_dcf_fcf_crecimiento_constante_es_gordon_exacto():
-    # Sin historia el crecimiento inicial = g: FCF_t = 100*(1+g)^t y VP = FCF0*(1+g)/(WACC-g) = 100*1.02/0.08 = 1275
-    # => 127.5 por accion (caja neta 0, 10 acciones), igual a 5 y a 10 anios.
+    # Sin historia el crecimiento = g en todos los anios: FCF_t = 100*(1.02)^t. Con flujos a MITAD DE ANIO (DF_t =
+    # 1.1^-(t-0.5)) y el valor terminal descontado con el DF del ultimo flujo (t = N-0.5), el total es la perpetuidad
+    # de Gordon desplazada medio anio: 100*1.02/0.08 * 1.1^0.5 = 1275 * 1.0488088 = 1337.23 => 133.723 por accion
+    # (caja neta 0, 10 acciones), igual a 5 y a 10 anios.
     e, p = ent(fcf_ltm=100.0), Par(wacc=0.10, g=0.02)
-    assert px(e, "dcf_5y_fcf", p) == pytest.approx(127.5, rel=TOL)
-    assert px(e, "dcf_10y_fcf", p) == pytest.approx(127.5, rel=TOL)
+    assert px(e, "dcf_5y_fcf", p) == pytest.approx(127.5 * MA, rel=TOL)
+    assert px(e, "dcf_10y_fcf", p) == pytest.approx(127.5 * MA, rel=TOL)
 
 
 def test_dcf_fcf_suma_caja_neta_y_divide_entre_acciones_diluidas():
-    # (1275 + caja 50 - deuda 20) / 10 = 130.5 ; con 20 acciones = 65.25
+    # (1275*1.1^0.5 + caja 50 - deuda 20) / 10 ; con 20 acciones: (1275*1.1^0.5 + 30) / 20
     e, p = ent(fcf_ltm=100.0, caja=50.0, deuda_total=20.0), Par(wacc=0.10, g=0.02)
-    assert px(e, "dcf_5y_fcf", p) == pytest.approx(130.5, rel=TOL)
+    assert px(e, "dcf_5y_fcf", p) == pytest.approx((1275 * MA + 30) / 10, rel=TOL)
     assert px(ent(fcf_ltm=100.0, caja=50.0, deuda_total=20.0, acciones_diluidas=20.0), "dcf_5y_fcf", p) == \
-        pytest.approx(65.25, rel=TOL)
+        pytest.approx((1275 * MA + 30) / 20, rel=TOL)
 
 
-def _dcf_manual(f0, g0, g, w, n, neto=0.0, acc=10.0):
+def _dcf_manual(f0, g1, g, w, n, neto=0.0, acc=10.0):
+    """DCF de 2 etapas a mano: anios 1-3 crecen g1; anios 4..n decaen linealmente hasta g en el anio n; mitad de anio."""
     flujos, f = [], f0
-    for i in range(n):  # crecimiento lineal g0 -> g (anio 1 = g0, anio n = g)
-        gt = g0 + (g - g0) * i / (n - 1)
+    for t in range(1, n + 1):
+        gt = g1 if t <= 3 else g1 + (g - g1) * (t - 3) / (n - 3)
         f *= 1 + gt
         flujos.append(f)
-    vp = sum(fl / (1 + w) ** (t + 1) for t, fl in enumerate(flujos))
-    vt = flujos[-1] * (1 + g) / (w - g) / (1 + w) ** n
+    vp = sum(fl / (1 + w) ** (t - 0.5) for t, fl in enumerate(flujos, 1))
+    vt = flujos[-1] * (1 + g) / (w - g) / (1 + w) ** (n - 0.5)     # TV con el DF del ultimo flujo (t = n - 0.5)
     return (vp + vt + neto) / acc
 
 
 def test_dcf_fcf_crecimiento_converge_linealmente_hacia_g():
-    # hist [100,110,121] -> CAGR 10 % -> g0 = HAIRCUT*10 % = 5 %; 5 y 10 anios convergen linealmente a g = 2 %
+    # hist [100,110,121]: CAGR winsorizado 10 % (3Y y 5Y), momentum 10 %, sin forward -> crecimiento fundamental 10 %;
+    # etapa 1 = 65 % * 10 % = 6.5 % (anios 1-3); la etapa 2 decae linealmente hasta g = 2 % en el anio n.
     e, p = ent(fcf_ltm=121.0, hist_fcf=[100.0, 110.0, 121.0]), Par(wacc=0.10, g=0.02)
-    assert fv.HAIRCUT == 0.5
-    assert px(e, "dcf_5y_fcf", p) == pytest.approx(_dcf_manual(121.0, 0.05, 0.02, 0.10, 5), rel=1e-9)
-    assert px(e, "dcf_10y_fcf", p) == pytest.approx(_dcf_manual(121.0, 0.05, 0.02, 0.10, 10), rel=1e-9)
-    assert px(e, "dcf_5y_fcf", p) > 121.0 * 1.02 / 0.08 / 10.0  # mas que con crecimiento constante g (154.28)
+    assert fv.FRACCION_CRECIMIENTO == 0.65 and fv.ANIOS_ETAPA1 == 3
+    assert px(e, "dcf_5y_fcf", p) == pytest.approx(_dcf_manual(121.0, 0.065, 0.02, 0.10, 5), rel=1e-9)
+    assert px(e, "dcf_10y_fcf", p) == pytest.approx(_dcf_manual(121.0, 0.065, 0.02, 0.10, 10), rel=1e-9)
+    assert px(e, "dcf_5y_fcf", p) > 121.0 * 1.02 / 0.08 / 10.0 * MA   # mas que con crecimiento constante g
 
 
 def test_dcf_crecimiento_inicial_se_acota_al_tope():
-    e = ent(fcf_ltm=100.0, hist_fcf=[1.0, 1000.0])  # CAGR 99900 %: se acota
-    g0, nota = fv._crecimiento_inicial(e.hist_fcf, 0.02)
-    assert g0 == fv.CRECIMIENTO_TOPE and "acotado" in nota
-    g0, _ = fv._crecimiento_inicial([100.0, 1.0], 0.02)  # caida fuerte -> piso
+    e = ent(fcf_ltm=100.0, hist_fcf=[1.0, 1000.0])  # variacion +99900 % -> recorte duro a +100 % -> 65 % -> tope
+    r = fv.crecimiento_etapa1(e.hist_fcf, None, 0.02, "medio")
+    assert r["g1"] == fv.TOPE_CRECIMIENTO_ETAPA1["medio"] == 0.42 and "topado a 42 %" in r["tope"]
+    assert fv.crecimiento_etapa1(e.hist_fcf, None, 0.02, "pesimista")["g1"] == 0.15      # tope del Pesimista
+    g0, _ = fv._crecimiento_inicial([100.0, 1.0], 0.02)  # caida fuerte (-50 % recortado) * 65 % = -32.5 % -> piso
     assert g0 == fv.CRECIMIENTO_MIN
 
 
 def test_dcf_ebitda_formula_documentada():
-    # flujo0 = EBITDA*(1-t) + D&A*t - capex = 200*0.75 + 40*0.25 - 40 = 120 ; sin NWC y crecimiento g constante:
-    # valor = 120*1.02/0.08 = 1530 -> 153.0 por accion
+    # flujo0 = EBITDA*(1-t) + D&A*t - capex = 200*0.75 + 40*0.25 - 40 = 120 ; sin NWC, sin historia (la conversion
+    # objetivo = la actual 0.6) y crecimiento g constante: valor = 120*1.02/0.08 * 1.1^0.5 = 1530*MA -> 153.0*MA
     e = ent(ebitda_ltm=200.0, da_ltm=40.0, capex_ltm=40.0)
     p = Par(wacc=0.10, g=0.02)
-    assert px(e, "dcf_5y_ebitda", p) == pytest.approx(153.0, rel=TOL)
-    assert px(e, "dcf_10y_ebitda", p) == pytest.approx(153.0, rel=TOL)
+    assert px(e, "dcf_5y_ebitda", p) == pytest.approx(153.0 * MA, rel=TOL)
+    assert px(e, "dcf_10y_ebitda", p) == pytest.approx(153.0 * MA, rel=TOL)
 
 
 def test_dcf_ebitda_con_capital_de_trabajo():
-    # nwc 100 / EBITDA 200 = 0.5 ; k = 120/200 = 0.6 ; flujo_1 = E0*(1.02*0.6 - 0.02*0.5) = 200*0.602 = 120.4
-    # valor = flujo_1/(w-g) = 120.4/0.08 = 1505 -> 150.5
+    # nwc 100 / EBITDA 200 = 0.5 ; k = 0.6. Anios 1-3 (etapa 1): flujo_t = eb_t*0.6 - 0.5*(eb_t - eb_{t-1}) con
+    # eb_t = 200*1.02^t. Desde el anio 4 el flujo converge linealmente a la conversion objetivo (0.6, sin historia):
+    # flujo_t = (1-w)*estructural + w*0.6*eb_t con w = (t-3)/(n-3). Calculo explicito (n = 5, WACC 10 %, g 2 %):
+    n = 5
+    prev, flujos = 200.0, []
+    for t in range(1, n + 1):
+        eb = prev * 1.02
+        estr = eb * 0.6 - 0.5 * (eb - prev)
+        wt = 0.0 if t <= 3 else (t - 3) / (n - 3)
+        flujos.append((1 - wt) * estr + wt * 0.6 * eb)
+        prev = eb
+    esperado = (sum(f / 1.1 ** (t - 0.5) for t, f in enumerate(flujos, 1)) + flujos[-1] * 1.02 / 0.08 / 1.1 ** 4.5) / 10
     e = ent(ebitda_ltm=200.0, da_ltm=40.0, capex_ltm=40.0, nwc_operativo=100.0)
-    assert px(e, "dcf_5y_ebitda", Par(wacc=0.10, g=0.02)) == pytest.approx(150.5, rel=TOL)
+    assert px(e, "dcf_5y_ebitda", Par(wacc=0.10, g=0.02)) == pytest.approx(esperado, rel=1e-12)
+    assert esperado < 153.0 * MA      # el capital de trabajo resta en la etapa 1
 
 
 def test_dcf_revenue_margen_constante():
-    # ingresos 1000, FCF 100 -> margen 10 % constante: igual que el DCF de FCF = 127.5
+    # ingresos 1000, FCF 100 -> margen 10 % constante: igual que el DCF de FCF = 127.5 * 1.1^0.5
     e = ent(ingresos_ltm=1000.0, fcf_ltm=100.0)
     p = Par(wacc=0.10, g=0.02)
-    assert px(e, "dcf_5y_revenue", p) == pytest.approx(127.5, rel=TOL)
-    assert px(e, "dcf_10y_revenue", p) == pytest.approx(127.5, rel=TOL)
+    assert px(e, "dcf_5y_revenue", p) == pytest.approx(127.5 * MA, rel=TOL)
+    assert px(e, "dcf_10y_revenue", p) == pytest.approx(127.5 * MA, rel=TOL)
 
 
 def test_dcf_revenue_margen_converge_al_objetivo_historico():
-    # margen actual 5 %, mediana historica 10 % -> objetivo 10 %; ingresos constantes (g = 0): FCF_t = 1000*m_t con
-    # m_t = 0.05 + 0.05*t/5 -> 60, 70, 80, 90, 100 ; VT = 100/0.10 = 1000
+    # margen actual 5 %, mediana recortada historica 10 % -> objetivo 10 %; ingresos constantes (crecimiento 0): el margen
+    # se mantiene 5 % en los anios 1-3 y converge linealmente en los anios 4-5 (n = 5): m_4 = 7.5 %, m_5 = 10 % ->
+    # flujos 50, 50, 50, 75, 100 ; VT = 100/0.10 = 1000 descontado con DF(4.5)
     e = ent(ingresos_ltm=1000.0, fcf_ltm=50.0, hist_fcf=[100.0, 100.0, 100.0], hist_ingresos=[1000.0] * 3)
-    esperado = (sum(f / 1.1 ** t for t, f in enumerate([60, 70, 80, 90, 100], 1)) + 1000 / 1.1 ** 5) / 10
+    esperado = (sum(f / 1.1 ** (t - 0.5) for t, f in enumerate([50, 50, 50, 75, 100], 1)) + 1000 / 1.1 ** 4.5) / 10
     assert px(e, "dcf_5y_revenue", Par(wacc=0.10, g=0.0)) == pytest.approx(esperado, rel=1e-9)
 
 
 def test_dcf_revenue_margen_objetivo_tiene_tope():
-    e = ent(ingresos_ltm=1000.0, fcf_ltm=500.0, hist_fcf=[500.0] * 3, hist_ingresos=[1000.0] * 3)  # margen 50 %
+    e = ent(ingresos_ltm=1000.0, fcf_ltm=600.0, hist_fcf=[600.0] * 3, hist_ingresos=[1000.0] * 3)  # margen 60 %
     act, obj, _ = fv._margen_fcf(e)
-    assert act == 0.5 and obj == fv.MARGEN_FCF_TOPE
+    assert act == 0.6 and obj == fv.TOPE_MARGEN["medio"] == 0.55         # tope Medio 55 %
+    assert fv._margen_fcf(e, "pesimista")[1] == fv.TOPE_MARGEN["pesimista"] == 0.30   # tope Pesimista 30 %
     assert px(e, "dcf_5y_revenue", Par(wacc=0.10, g=0.0)) < px(e, "dcf_5y_fcf", Par(wacc=0.10, g=0.0))
+    assert modelo(e, "dcf_5y_revenue", Par(wacc=0.10, g=0.0))["tope_activo"]
 
 
 def test_dcf_revenue_sin_fcf_usa_margen_operativo_despues_de_impuestos():
     e = ent(ingresos_ltm=1000.0, ebit_ltm=200.0)  # 200*(1-0.25)=150 -> margen 15 %
     assert fv._margen_fcf(e)[2].startswith("margen operativo")
-    assert px(e, "dcf_5y_revenue", Par(wacc=0.10, g=0.02)) == pytest.approx(150 * 1.02 / 0.08 / 10, rel=TOL)
+    assert px(e, "dcf_5y_revenue", Par(wacc=0.10, g=0.02)) == pytest.approx(150 * 1.02 / 0.08 / 10 * MA, rel=TOL)
 
 
 # ============================================================================== multiplos
@@ -196,16 +223,17 @@ def test_pb_no_informativo_con_multiplo_historico_enorme():
 
 # ============================================================================== dividendos y valor
 def test_ddm_gordon_con_ke_capm():
-    # ke = rf + beta*ERP = 0.04 + 1*0.05 = 0.09 ; D1 = 2*1.025 = 2.05 ; valor = 2.05/(0.09-0.025) = 31.5384615
+    # beta de Blume(1.0) = 1.0 ; ke = rf + beta*ERP = 0.04 + 1*0.05 = 0.09 ; g∞ Medio = 3.5 % ; D1 = 2*1.035 = 2.07 ;
+    # valor = 2.07/(0.09-0.035) = 37.636363
     e = ent(dividendo_anual=2.0, beta=1.0)
     p = Par(rf=0.04, erp=0.05)
-    assert px(e, "ddm", p) == pytest.approx(2.05 / 0.065, rel=TOL)
+    assert px(e, "ddm", p) == pytest.approx(2.07 / 0.055, rel=TOL)
 
 
 def test_ddm_el_wacc_del_usuario_desplaza_ke_en_paralelo():
-    # sin deuda: WACC automatico = ke = 0.09 ; con WACC = 0.10 el ke pasa a 0.10 -> 2.05/(0.10-0.025)
+    # sin deuda: WACC automatico = ke = 0.09 (dentro de [8 %, 11.5 %]) ; con WACC = 0.10 el ke pasa a 0.10 -> 2.07/(0.10-0.035)
     e = ent(dividendo_anual=2.0, beta=1.0)
-    assert px(e, "ddm", Par(rf=0.04, erp=0.05, wacc=0.10)) == pytest.approx(2.05 / 0.075, rel=TOL)
+    assert px(e, "ddm", Par(rf=0.04, erp=0.05, wacc=0.10)) == pytest.approx(2.07 / 0.065, rel=TOL)
 
 
 @pytest.mark.parametrize("kw, params, texto", [
@@ -252,10 +280,12 @@ def test_wacc_ponderado_por_estructura_de_capital():
 
 
 def test_wacc_automatico_acotado_y_beta_acotada():
-    alto = fv.calcular_tasas(ent(beta=5.0), Par(rf=0.04, erp=0.10))      # beta -> 2.0 ; ke = 0.24 -> WACC 14 %
-    assert alto["beta"] == fv.BETA_MAX and alto["wacc"] == fv.WACC_MAX
-    bajo = fv.calcular_tasas(ent(beta=0.1), Par(rf=0.01, erp=0.05))      # ke = 0.035 -> WACC 6 %
-    assert bajo["beta"] == fv.BETA_MIN and bajo["wacc"] == fv.WACC_MIN
+    # beta_raw 5.0 se descarta a BETA_RAW_MAX = 4.0 y Blume la lleva a 2/3*4+1/3 = 3.0 ; ke = 0.04+3*0.10 = 0.34 -> WACC 11.5 %
+    alto = fv.calcular_tasas(ent(beta=5.0), Par(rf=0.04, erp=0.10))
+    assert alto["beta"] == pytest.approx(3.0) and alto["wacc"] == fv.WACC_MAX == 0.115
+    # beta_raw 0.1 -> Blume 0.4 ; ke = 0.01+0.4*0.05 = 0.03 -> WACC 8.0 % (piso)
+    bajo = fv.calcular_tasas(ent(beta=0.1), Par(rf=0.01, erp=0.05))
+    assert bajo["beta"] == pytest.approx(0.4) and bajo["wacc"] == fv.WACC_MIN == 0.08
     sin_beta = fv.calcular_tasas(ent(), Par())
     assert sin_beta["beta"] == fv.BETA_DEFECTO and "no disponible" in sin_beta["beta_origen"]
 
@@ -281,7 +311,7 @@ def test_supuestos_expone_todo_lo_usado():
     e = ent(fcf_ltm=100.0, hist_fcf=[100.0, 121.0], beta=1.0, multiplos_hist={"pe": [10.0, 12.0, 14.0]})
     s = fv.supuestos(e, Par(wacc=0.11, g=0.03, margen_seguridad=0.2))
     assert s["wacc"] == 0.11 and s["g"] == 0.03 and s["margen_seguridad"] == 0.2 and s["g_valido"]
-    assert s["crecimiento_inicial_fcf"] == pytest.approx(0.105)
+    assert s["crecimiento_inicial_fcf"] == pytest.approx(0.65 * 0.21)   # momentum 21 % (1 sola variacion: sin CAGR)
     assert set(s["multiplos"]) == set(fv.RANGOS_MULTIPLOS) and s["multiplos"]["pe"]["valor"] == 12.0
     assert s["multiplos"]["ev_ebitda"]["valor"] is None
     assert {"ke", "kd", "rf", "erp", "beta", "tasa_impositiva", "margen_fcf_objetivo"} <= set(s)
@@ -370,10 +400,13 @@ def test_agregar_descarta_no_aplicables_y_precios_no_positivos():
 
 
 def test_filtro_iqr_con_cuatro_o_mas_validos():
-    # [98,100,101,102,1000]: Q1 = 100, Q3 = 102, IQR = 2 -> valla [97, 105] -> 1000 es outlier ; promedio 100.25
+    # [98,100,101,102,1000]: Q1 = 100, Q3 = 102, IQR = 2 -> valla [97, 105] -> 1000 es outlier. Familias de _res:
+    # m0 DCF 100 ; m1 Multiplos 102 ; m2 Valor 98 ; m3 Dividendos 101 (grupo Valor/Dividendos = (98+101)/2 = 99.5)
+    # fair_value = (100 + 102 + 99.5)/3 = 100.5 ; el promedio simple (informativo) = 401/4 = 100.25
     a = fv.agregar_valor_justo(_lista([100.0, 102.0, 98.0, 101.0, 1000.0]), None, 0.25, 100.0)
     assert a["modelos_outlier"] == ["m4"] and a["n_validos"] == 5 and a["n_usados"] == 4
-    assert a["fair_value"] == pytest.approx(100.25, rel=TOL)
+    assert a["fair_value"] == pytest.approx(301.5 / 3, rel=TOL) and a["promedio_simple"] == pytest.approx(100.25, rel=TOL)
+    assert a["metodo"] == "igualacion_familias" and a["mediana"] == pytest.approx(100.5, rel=TOL)
     assert a["incertidumbre"] == "Baja"
 
 
@@ -416,7 +449,9 @@ def test_menos_de_tres_modelos_validos_es_incertidumbre_alta(n):
 def test_modelos_activos_none_lista_vacia_y_subconjuntos():
     lista = _lista([100.0, 110.0, 120.0, 130.0])
     todos = fv.agregar_valor_justo(lista, None, 0.25, 100.0)
-    assert todos["fair_value"] == pytest.approx(115.0) and todos["modelos_desactivados"] == []
+    # DCF 100 ; Multiplos 110 ; Valor/Dividendos (120+130)/2 = 125 -> (100+110+125)/3 ; promedio simple 115
+    assert todos["fair_value"] == pytest.approx(335.0 / 3) and todos["promedio_simple"] == pytest.approx(115.0)
+    assert todos["modelos_desactivados"] == []
     sub = fv.agregar_valor_justo(lista, ["m0", "m1"], 0.25, 100.0)
     assert sub["fair_value"] == pytest.approx(105.0) and sub["modelos_desactivados"] == ["m2", "m3"]
     assert sub["modelos_usados"] == ["m0", "m1"] and sub["incertidumbre"] == "Alta"   # < 3 modelos
@@ -458,9 +493,14 @@ def test_desactivar_ddm_y_otros_subconjuntos_cambia_el_valor_justo():
     solo_dcf = fv.agregar_valor_justo(ms, [i for i in todos if i.startswith("dcf_")], 0.25, e.precio)["fair_value"]
     solo_mult = fv.agregar_valor_justo(ms, ["pe", "ev_ebitda", "ev_revenue", "pb", "p_fcf"], 0.25, e.precio)["fair_value"]
     assert len({round(v, 6) for v in (base, sin_ddm, solo_dcf, solo_mult)}) == 4
-    ddm = next(m["precio_estimado"] for m in ms if m["id"] == "ddm")
-    assert sin_ddm == pytest.approx((base * 15 - ddm) / 14, rel=1e-9) or "ddm" in fv.agregar_valor_justo(
-        ms, todos, 0.25, 100.0)["modelos_outlier"]
+    # sin DDM: igualacion de familias a mano sobre los modelos usados (DCF / Multiplos / Valor+Dividendos)
+    ag = fv.agregar_valor_justo(ms, [i for i in todos if i != "ddm"], p.margen_seguridad, e.precio)
+    px_ = {m["id"]: m["precio_estimado"] for m in ms}
+    grupos = {"DCF": [], "M": [], "V": []}
+    for i in ag["modelos_usados"]:
+        grupos["DCF" if i.startswith("dcf_") else "M" if i in ("pe", "ev_ebitda", "ev_revenue", "pb", "p_fcf") else "V"].append(px_[i])
+    manual = sum(sum(v) / len(v) for v in grupos.values() if v) / sum(1 for v in grupos.values() if v)
+    assert sin_ddm == pytest.approx(manual, rel=1e-12) and "ddm" not in ag["modelos_usados"]
 
 
 def test_wacc_mayor_baja_los_dcf_y_g_mayor_los_sube():
@@ -536,7 +576,9 @@ def test_extraer_entradas_desde_xbrl_con_cifras_conocidas():
     assert e.caja == 500.0 and e.deuda_total == 500.0            # 300 + 200 ; 400 + 100 (papel comercial)
     assert e.nwc_operativo == pytest.approx((700 - 500) - (300 - 100))   # (activo corr. - caja) - (pasivo corr. - deuda cp)
     assert e.beta == 1.2 and e.sector == "Technology" and e.precio == 100.0 and e.dividendo_anual == 0.0
-    assert len(e.hist_fcf) == 6 and set(e.hist_fcf) == {100.0} and set(e.hist_ingresos) == {1000.0}
+    # 28 trimestres = 7 ejercicios LTM (modo local: hasta 10 anios + TTM sin recortes)
+    assert len(e.hist_fcf) == 7 and set(e.hist_fcf) == {100.0} and set(e.hist_ingresos) == {1000.0}
+    assert e.modo == "local" and e.anios_historia == 10 and len(e.hist_fechas) == 7 and len(e.serie_ttm) == 25
     assert e.fecha_ltm is not None and e.fuentes["fcf_ltm"].startswith("SEC EDGAR")
     json.dumps(e.to_dict())
 
@@ -545,7 +587,7 @@ def test_extraer_entradas_multiplos_historicos_propios():
     # precio constante 100 sin dividendos: P/E = 100/4 = 25 ; P/FCF = 100*10/100 = 10 ; EV/EBITDA = (1000 + 500 - 500)/200 = 5
     e = fv.extraer_entradas("T", None, _df_precios(), {}, facts=_facts_falsos())
     mh = e.multiplos_hist
-    assert len(mh["pe"]) == 5 and all(v == pytest.approx(25.0) for v in mh["pe"])
+    assert len(mh["pe"]) == 6 and all(v == pytest.approx(25.0) for v in mh["pe"])   # k = 1..6 anios atras
     assert all(v == pytest.approx(10.0) for v in mh["p_fcf"])
     assert all(v == pytest.approx(5.0) for v in mh["ev_ebitda"])
     assert all(v == pytest.approx(1.0) for v in mh["ev_revenue"])   # (1000 + 0) / 1000
@@ -707,63 +749,69 @@ def test_estado_modelo_prioridad_y_textos():
     assert ui_mod.estado_modelo(na, agg, False) == ("no_aplica", "No aplica: EPS LTM negativo o cero")
 
 
-def test_figura_valor_justo_barras_lineas_y_oscuro():
+def _esc_rico(activos=None, e=None, params=None, px_=100.0):
+    e = e or _entradas_ricas()
+    ids = None if activos is None else [i for i, v in activos.items() if v]
+    return fv.calcular_escenarios(e, params, ids, None, px_)
+
+
+def test_opciones_barras_dos_series_lineas_y_estados():
     e = _entradas_ricas()
     e.eps_ltm = -1.0   # P/E, Graham y Lynch no aplican
     activos = {i: i != "ddm" for i in fv.IDS_MODELOS}
-    agg = ui_mod.valor_justo_de_entradas(e, None, activos, 100.0)
-    fig = ui_mod.construir_figura_valor_justo(agg["modelos"], agg, 100.0, activos)
-    nombres = {t.name.rsplit(" (", 1)[0] for t in fig.data}
-    assert {"Activo", "Desactivado por usuario", "No aplica"} <= nombres
-    assert sum(len(t.y) for t in fig.data) == 15 and all(t.orientation == "h" for t in fig.data)
-    assert len(fig.layout.shapes) == 2 and {s.line.color for s in fig.layout.shapes} == \
-        {ui_mod.COLOR_FAIR_VALUE, ui_mod.COLOR_PRECIO}
-    assert any("Valor justo $" in a.text for a in fig.layout.annotations)
-    assert fig.layout.hoverlabel.bgcolor == ui_mod.BG_POPUP and fig.layout.paper_bgcolor == ui_mod.BG_PAPEL
-    for t in fig.data:
-        assert t.hoverlabel.bgcolor == ui_mod.BG_POPUP and t.hoverlabel.font.color == ui_mod.TXT
-    vacia = ui_mod.construir_figura_valor_justo(None, None, None)
-    assert "Pulsa Recalcular" in vacia.layout.annotations[0].text
+    esc = _esc_rico(activos, e)
+    opc = ui_mod.opciones_barras(esc, 100.0, activos)
+    medio, pes = opc["series"]
+    assert [s_["name"] for s_ in opc["series"]] == ["Escenario Medio", "Escenario Pesimista"]
+    assert all(s_["type"] == "bar" and len(s_["data"]) == 15 for s_ in opc["series"]) and opc["yAxis"]["inverse"] is True
+    nombres = opc["yAxis"]["data"]
+    assert len(nombres) == 15 and "P/E · no aplica" in nombres and "DDM (dividendos) · desactivado" in nombres
+    i_pe, i_ddm, i_dcf = nombres.index("P/E · no aplica"), nombres.index("DDM (dividendos) · desactivado"), 0
+    assert medio["data"][i_pe]["value"] is None and pes["data"][i_pe]["value"] is None            # no aplica: sin barra
+    d = medio["data"][i_ddm]
+    assert d["itemStyle"]["color"] == ui_mod.VJ_INACTIVO and d["itemStyle"]["opacity"] < 1           # desactivado: gris y atenuado
+    assert medio["data"][i_dcf]["itemStyle"]["color"] in (ui_mod.VJ_ACTIVO, ui_mod.AVISO_TXT)
+    assert pes["data"][i_dcf]["itemStyle"]["color"] in (ui_mod.VJ_PESIMISTA, ui_mod.AVISO_TXT)
+    lineas = medio["markLine"]["data"]
+    assert [round(l["xAxis"], 2) for l in lineas] == [round(esc["medio"]["fair_value"], 2),
+                                                      round(esc["pesimista"]["fair_value"], 2), 100.0]
+    assert [l["lineStyle"]["color"] for l in lineas] == [ui_mod.COLOR_FAIR_VALUE, ui_mod.VJ_PESIMISTA, ui_mod.COLOR_PRECIO]
+    assert "Valor justo Medio $" in lineas[0]["label"]["formatter"] and "Piso Pesimista $" in lineas[1]["label"]["formatter"]
+    vacia = ui_mod.opciones_barras(None, None, None, "Sin análisis")
+    assert vacia["title"]["text"] == "Sin análisis" and all(s_["data"] == [] for s_ in vacia["series"])
+    assert ui_mod.alto_barras(15) >= 420
 
 
-def test_figura_valor_justo_marca_los_outliers():
-    lista = [{**_res(f"m{i}", v), "nombre": f"M{i}"} for i, v in enumerate([100.0, 102.0, 98.0, 101.0, 1000.0])]
-    agg = fv.agregar_valor_justo(lista, None, 0.25, 100.0)
-    fig = ui_mod.construir_figura_valor_justo(lista, agg, 100.0)
-    out = next(t for t in fig.data if t.name.startswith("Outlier"))
-    assert list(out.y) == ["M4"] and out.marker.color == ui_mod.AVISO_TXT
+def test_opciones_barras_marca_outliers_topes_y_fuera_de_escala():
+    base = _esc_rico()
+    esc = {**base, "modelos": [dict(m) for m in base["modelos"]]}
+    esc["medio"] = {**base["medio"], "modelos_outlier": ["pb"]}
+    esc["modelos"][9]["precio_medio"] = 100000.0          # pb: fuera de escala
+    esc["modelos"][6]["topes_medio"] = ["P/E topado a 35x"]
+    opc = ui_mod.opciones_barras(esc, 100.0, None)
+    medio = opc["series"][0]["data"]
+    pb, pe = medio[9], medio[6]
+    assert pb["itemStyle"]["color"] == ui_mod.AVISO_TXT and "outlier" in pb["label"]["formatter"]
+    assert "▶" in pb["label"]["formatter"] and pb["value"] <= opc["xAxis"]["max"]    # no deforma la escala: se recorta con flecha
+    assert opc["xAxis"]["max"] < 10000
+    assert pe["label"]["formatter"].endswith("· tope")
+
+
+def _overlays(df, zonas=None, px=None, **kw):
+    datos = ui_mod.datos_grafico(df, "T")
+    px = px if px is not None else float(df["Close"].iloc[-1])
+    return ui_mod.overlays_grafico(datos, "T", zonas or [], px, **kw)
 
 
 def test_figura_analisis_linea_de_valor_justo(df_sintetico):
     px_ = float(df_sintetico["Close"].iloc[-1])
-    sin = ui_mod.construir_figura(df_sintetico, "T", [], px_)
-    assert not [a for a in sin.layout.annotations if "Fair Value" in (a.text or "")]
+    assert _overlays(df_sintetico)["vj"] is None                      # sin valor justo: sin linea
     vj = {"fair_value": px_ * 1.3, "upside_pct": 30.0}
-    fig = ui_mod.construir_figura(df_sintetico, "T", [], px_, valor_justo=vj)
-    ann = [a for a in fig.layout.annotations if "Fair Value" in (a.text or "")]
-    assert len(ann) == 1 and re.fullmatch(r"Fair Value: \$[\d,]+\.\d\d \(\+30% Upside\)", ann[0].text)
-    linea = [s for s in fig.layout.shapes if s.line.color == ui_mod.COLOR_FAIR_VALUE]
-    assert len(linea) == 1 and linea[0].line.dash == "dash" and linea[0].y0 == pytest.approx(px_ * 1.3)
-    assert fig.layout.yaxis.range[1] >= px_ * 1.3          # el eje Y incluye la linea
-    assert ann[0].font.color == ui_mod.COLOR_FAIR_VALUE
-    bajista = ui_mod.construir_figura(df_sintetico, "T", [], px_, valor_justo={"fair_value": px_ * 0.7, "upside_pct": -30.0})
-    assert any("(-30% Upside)" in (a.text or "") for a in bajista.layout.annotations)
-
-
-def test_linea_de_valor_justo_no_se_solapa_con_las_etiquetas_de_bandas(df_sintetico):
-    """Las bandas etiquetan arriba a la izquierda, las anclas de valoracion abajo a la derecha: el valor justo, arriba a la
-    derecha (misma anotacion de plotly con xanchor/yanchor distintos)."""
-    px_ = float(df_sintetico["Close"].iloc[-1])
-    zonas = [{"nivel": 1, "r_inf": px_ * 0.8, "r_sup": px_ * 0.85, "familias": ["volumen"], "tipos": ["POC"],
-              "fuente": "POC", "n_familias": 1}]
-    fig = ui_mod.construir_figura(df_sintetico, "T", zonas, px_, anclas_val=[{"tipo": "DCF_MoS30", "precio": px_ * 1.1}],
-                                  valor_justo={"fair_value": px_ * 1.3, "upside_pct": 30.0})
-    por_texto = {a.text: a for a in fig.layout.annotations}
-    fair = next(a for t, a in por_texto.items() if t.startswith("Fair Value"))
-    banda = next(a for t, a in por_texto.items() if t.startswith("N1"))
-    valoracion = por_texto["DCF_MoS30"]
-    assert fair.xanchor == "right" and banda.xanchor == "left" and valoracion.xanchor == "right"
-    assert fair.yanchor == "bottom" and valoracion.yanchor == "top"   # arriba vs abajo de su linea
+    linea = _overlays(df_sintetico, valor_justo=vj)["vj"]
+    assert re.fullmatch(r"Fair Value Medio: \$[\d,]+\.\d\d \(\+30% Upside\)", linea["etiqueta"])
+    assert linea["precio"] == pytest.approx(px_ * 1.3, abs=1e-3) and linea["fuera_de_rango"] is None
+    bajista = _overlays(df_sintetico, valor_justo={"fair_value": px_ * 0.7, "upside_pct": -30.0})["vj"]
+    assert "(-30% Upside)" in bajista["etiqueta"]
 
 
 def test_badges_de_incertidumbre_cumplen_contraste():
@@ -831,7 +879,8 @@ def vista(cliente, df_sintetico, monkeypatch):
 
 
 def _anot_fair(v):
-    return [a.text for a in v.grafico.figure.layout.annotations if "Fair Value" in (a.text or "")]
+    vj = (v.grafico_overlays or {}).get("vj")      # etiqueta de la linea del Escenario Medio en el grafico de Analisis
+    return [vj["etiqueta"]] if vj else []
 
 
 def _clic(cliente, accion):
@@ -857,19 +906,45 @@ def test_vista_tab_valor_justo_y_controles(cliente, vista):
 
 
 def test_vista_kpis_coinciden_con_el_calculo(vista):
-    agg = vista.vj_agg
-    assert agg and agg["fair_value"] is not None
+    """Cuatro tarjetas: precio, valor justo Medio, piso Pesimista y diagnostico (con incertidumbre)."""
+    esc, agg = vista.vj_esc, vista.vj_agg
+    assert agg is esc["medio"] and agg["fair_value"] is not None and esc["pesimista"]["fair_value"] is not None
+    assert set(vista.vj_kpi) == {"precio", "fair", "piso", "diag", "incert"}
     assert vista.vj_kpi["precio"].text == "$100.00"
     assert vista.vj_kpi["fair"].text == f"${agg['fair_value']:,.2f}"
-    nota = ui_mod.nota_soporte(agg["incertidumbre"], agg["n_usados"])
-    assert vista.vj_kpi["potencial"].text == f"{agg['upside_pct']:+.1f} %" + (f" · {nota}" if nota else "")
-    assert vista.vj_kpi["mos"].text == f"${agg['margin_of_safety_price']:,.2f}"
+    assert vista.vj_kpi["piso"].text == f"${esc['pesimista']['fair_value']:,.2f}"
+    assert esc["pesimista"]["fair_value"] < agg["fair_value"]                       # el Pesimista es un piso, no un techo
     assert agg["margin_of_safety_price"] == pytest.approx(agg["fair_value"] * 0.75)
-    assert vista.vj_kpi["incert"].text == agg["incertidumbre"]
+    assert f"${agg['margin_of_safety_price']:,.2f}" in vista.vj_kpi_sub["fair"].text   # precio con margen: subtexto
+    assert "estrés duro" in vista.vj_kpi_sub["piso"].text
+    dx = ui_mod.diagnostico_valoracion(100.0, agg["fair_value"], agg["incertidumbre"], agg["n_usados"])
+    assert vista.vj_kpi["diag"].text.startswith(dx["texto"]) and dx["clave"] in ("sobre", "infra", "linea")
+    clase = "vj-dx-debil" if dx["debil"] else f"vj-dx-{dx['clave']}"
+    assert clase in vista.vj_kpi["diag"]._classes and "vj-badge" in vista.vj_kpi["diag"]._classes
+    assert vista.vj_kpi["incert"].text == f"Incertidumbre {agg['incertidumbre']}"
     clase = {"Baja": "vj-baja", "Media": "vj-media", "Alta": "vj-alta"}[agg["incertidumbre"]]
     assert clase in vista.vj_kpi["incert"]._classes and "vj-badge" in vista.vj_kpi["incert"]._classes
-    signo = "txt-muted" if nota else ("txt-ok" if agg["upside_pct"] >= 0 else "txt-error")   # soporte debil: atenuado
-    assert signo in vista.vj_kpi["potencial"]._classes
+
+
+def test_diagnostico_de_valoracion_umbrales_con_nombre_y_soporte_debil():
+    f = ui_mod.diagnostico_valoracion
+    assert ui_mod.UMBRAL_DIAGNOSTICO == 0.10
+    assert f(111.0, 100.0)["clave"] == "sobre" and f(111.0, 100.0)["texto"] == "Sobrevalorada"
+    assert f(110.0, 100.0)["clave"] == "sobre"                      # el borde (+10 %) ya es sobrevaloracion
+    assert f(109.0, 100.0)["clave"] == "linea" and f(109.0, 100.0)["texto"] == "En línea"
+    assert f(91.0, 100.0)["clave"] == "linea" and f(90.0, 100.0)["clave"] == "infra"
+    assert f(70.0, 100.0)["texto"] == "Infravalorada"
+    assert f(111.0, 100.0)["premium_pct"] == pytest.approx(11.0)
+    assert f(None, 100.0)["clave"] is None and f(100.0, None)["texto"] == "n/d" and f(100.0, -5.0)["clave"] is None
+    assert f(150.0, 100.0, "Alta", 9)["debil"] == "incert. Alta" and f(150.0, 100.0, "Media", 2)["debil"] == "n=2"
+    assert f(150.0, 100.0, "Baja", 9)["debil"] is None
+
+
+def test_diagnostico_debil_atenua_el_badge(vista):
+    vista.vj_activos = {i: i in ("pe", "pb") for i in fv.IDS_MODELOS}       # solo 2 modelos: n < 3 => soporte debil
+    vista._vj_aplicar()
+    assert vista.vj_agg["n_usados"] == 2
+    assert "vj-dx-debil" in vista.vj_kpi["diag"]._classes and "n=2" in vista.vj_kpi["diag"].text
 
 
 def test_vista_casillas_estado_y_no_aplicables_deshabilitadas(cliente, df_sintetico, monkeypatch):
@@ -903,7 +978,7 @@ def test_vista_casilla_recalcula_kpis_grafico_y_linea(vista):
     assert "dcf_5y_fcf" in vista.vj_agg["modelos_desactivados"]
     assert vista.vj_kpi["fair"].text == f"${despues:,.2f}"
     assert f"${despues:,.2f}" in _anot_fair(vista)[0]                       # la linea de Analisis sigue a los modelos activos
-    assert any(t.name.startswith("Desactivado por usuario") for t in vista.vj_grafico.figure.data)
+    assert vista.vj_barras.options["yAxis"]["data"][0].endswith("desactivado")      # dcf_5y_fcf es el primer modelo
     vista.vj_rows["dcf_5y_fcf"]["chk"].value = True
     assert vista.vj_agg["fair_value"] == pytest.approx(antes)
 
@@ -939,13 +1014,13 @@ def test_vista_sliders_recalculan_y_restablecer_vuelve_al_automatico(cliente, vi
     nuevo = {m["id"]: m["precio_estimado"] for m in vista.vj_agg["modelos"]}
     assert nuevo["dcf_5y_fcf"] < base["dcf_5y_fcf"] and nuevo["epv"] < base["epv"] and nuevo["pe"] == base["pe"]
     assert vista.vj_agg["fair_value"] != fair0
-    vista.vj_sl["g"].value = 3.5
-    assert vista.vj_params.g == pytest.approx(0.035) and \
+    vista.vj_sl["g"].value = 4.0
+    assert vista.vj_params.g == pytest.approx(0.04) and \
         {m["id"]: m["precio_estimado"] for m in vista.vj_agg["modelos"]}["dcf_5y_fcf"] > nuevo["dcf_5y_fcf"]
     vista.vj_sl["mos"].value = 40
     assert vista.vj_params.margen_seguridad == pytest.approx(0.4)
     assert vista.vj_agg["margin_of_safety_price"] == pytest.approx(vista.vj_agg["fair_value"] * 0.6)
-    assert vista.vj_kpi["mos"].text == f"${vista.vj_agg['margin_of_safety_price']:,.2f}"
+    assert f"${vista.vj_agg['margin_of_safety_price']:,.2f}" in vista.vj_kpi_sub["fair"].text
     _clic(cliente, "vj-reset")
     assert vista.vj_params == fv.ParametrosValoracion() and vista.vj_sl["wacc"].value == auto_w
     assert vista.vj_sl["g"].value == round(fv.CRECIMIENTO_TERMINAL_DEFECTO * 100, 1)
@@ -953,12 +1028,12 @@ def test_vista_sliders_recalculan_y_restablecer_vuelve_al_automatico(cliente, vi
     assert vista.vj_agg["fair_value"] == pytest.approx(fair0)
 
 
-def test_vista_el_slider_de_g_se_limita_a_wacc_menos_un_punto(vista):
+def test_vista_el_slider_de_g_se_limita_a_wacc_menos_dos_puntos_y_medio(vista):
     vista.vj_sl["wacc"].value = 5.0
     vista.vj_sl["g"].value = 5.0
-    assert vista.vj_sl["g"].value == pytest.approx(4.0) and vista.vj_params.g == pytest.approx(0.04)
-    assert float(vista.vj_sl["g"].props["max"]) == pytest.approx(4.0)
-    assert next(m for m in vista.vj_agg["modelos"] if m["id"] == "dcf_5y_fcf")["aplicable"]   # 5 % - 4 % = 1 pp
+    assert vista.vj_sl["g"].value == pytest.approx(2.5) and vista.vj_params.g == pytest.approx(0.025)
+    assert float(vista.vj_sl["g"].props["max"]) == pytest.approx(2.5)
+    assert next(m for m in vista.vj_agg["modelos"] if m["id"] == "dcf_5y_fcf")["aplicable"]   # 5 % - 2.5 % = 2.5 pp
     vista.vj_sl["wacc"].value = 12.0
     assert float(vista.vj_sl["g"].props["max"]) == pytest.approx(5.0)
 
@@ -991,7 +1066,7 @@ def test_vista_toggle_mostrar_valor_justo_en_analisis(vista):
     assert not _anot_fair(vista)
     vista.sw_vj.value = True
     txt = _anot_fair(vista)
-    assert len(txt) == 1 and re.fullmatch(r"Fair Value: \$[\d,]+\.\d\d \([+-]\d+% Upside\)( · .+)?", txt[0])
+    assert len(txt) == 1 and re.fullmatch(r"Fair Value Medio: \$[\d,]+\.\d\d \([+-]\d+% Upside\)( · .+)?", txt[0])
     assert f"{vista.vj_agg['upside_pct']:+.0f}% Upside" in txt[0]
     vista.vj_sl["wacc"].value = 13.0                      # la linea sigue a los sliders
     assert f"${vista.vj_agg['fair_value']:,.2f}" in _anot_fair(vista)[0]
@@ -1098,18 +1173,46 @@ def test_modelo_seccion_valor_justo_lee_las_constantes_del_codigo(monkeypatch):
     def texto():
         return ui_mod.texto_seccion(next(s for s in ui_mod.contenido_modelo() if s["id"] == "valor_justo"))
     base = texto()
-    assert "0,15" in base and "0,35" in base and "1,5" in base
+    for cifra in ("0,15", "0,35", "1,5", "42 %", "15 %", "55 %", "30 %", "3,5 %", "2,5 %", "12,5 %", "2026-11"):
+        assert cifra in base, cifra
     monkeypatch.setattr(fv, "CV_BAJO", 0.22)
     monkeypatch.setattr(fv, "CV_ALTO", 0.41)
     monkeypatch.setattr(fv, "IQR_K", 2.5)
     monkeypatch.setattr(fv, "MIN_MODELOS_CONFIABLE", 5)
     monkeypatch.setattr(fv, "MIN_MODELOS_IQR", 7)
-    monkeypatch.setattr(fv, "MARGEN_FCF_TOPE", 0.4)
-    monkeypatch.setattr(fv, "CRECIMIENTO_TOPE", 0.2)
+    monkeypatch.setattr(fv, "TOPE_CRECIMIENTO_ETAPA1", {"medio": 0.37, "pesimista": 0.11})
+    monkeypatch.setattr(fv, "TOPE_MARGEN", {"medio": 0.61, "pesimista": 0.27})
+    monkeypatch.setattr(fv, "G_TERMINAL", {"medio": 0.033, "pesimista": 0.021})
+    monkeypatch.setattr(fv, "WACC_PESIMISTA_MIN", 0.133)
+    monkeypatch.setattr(fv, "BENCHMARK_FECHA", "2030-01")
     nuevo = texto()
     assert "0,22" in nuevo and "0,41" in nuevo and "2,5" in nuevo and "menos de 5 modelos" in nuevo
-    assert "con 7 o más" in nuevo and "tope de 40 %" in nuevo and "tope 20 %" in nuevo
+    assert "con 7 o más" in nuevo and "37 %" in nuevo and "11 %" in nuevo and "61 %" in nuevo and "27 %" in nuevo
+    assert "13,3 %" in nuevo and "2030-01" in nuevo and "3,3 %" in nuevo and "2,1 %" in nuevo
     assert nuevo != base
+
+
+def test_modelo_seccion_valor_justo_sin_textos_obsoletos_y_con_el_motor_nuevo():
+    txt = ui_mod.texto_seccion(next(s for s in ui_mod.contenido_modelo() if s["id"] == "valor_justo")).lower()
+    for obsoleto in ("haircut", "dcf a 5 años", "tope 15 %", "descuentan a fin de año", "optimista, "):
+        assert obsoleto not in txt, obsoleto
+    for clave in ("dos escenarios", "medio", "pesimista", "no hay optimista", "^tnx", "blume", "mitad de año", "10 años",
+                  "2 etapas", "mediana recortada", "aproximación fijada a mano", "iguala el peso de cada familia", "iqr",
+                  "causal", "ancla", "no son point-in-time", "ilustrativa", "hipercrecimiento", "nvda", "estrés duro",
+                  "supuestos, no predicciones", "no un «peor caso realista»", "ejemplo"):
+        assert clave in txt, clave
+
+
+def test_ejemplo_numerico_del_modelo_sale_del_codigo_real():
+    ej = ui_mod._ejemplo_valor_justo()
+    esc = fv.calcular_escenarios(ej["entradas"], ej["params"], ["dcf_10y_fcf", "pe", "graham"])
+    assert ej["agg"]["fair_value"] == pytest.approx(esc["medio"]["fair_value"])
+    assert ej["agg_pes"]["fair_value"] == pytest.approx(esc["pesimista"]["fair_value"])
+    assert ej["agg_pes"]["fair_value"] < ej["agg"]["fair_value"]
+    media = (ej["dcf"] + ej["pe"] + ej["graham"]) / 3
+    assert ej["agg"]["fair_value"] == pytest.approx(media)          # una por familia: el promedio iguala familias
+    txt = ui_mod.texto_seccion(next(s for s in ui_mod.contenido_modelo() if s["id"] == "valor_justo"))
+    assert ui_mod._es(ej["agg"]["fair_value"], 1) in txt and ui_mod._es(ej["agg_pes"]["fair_value"], 1) in txt
 
 
 def test_modelo_seccion_valor_justo_se_renderiza_en_su_expansion(cliente):

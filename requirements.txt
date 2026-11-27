@@ -7,5 +7,4 @@ edgartools
 smartmoneyconcepts
 pytest
 nicegui
-plotly
 pywebview; sys_platform == 'win32'
