@@ -230,7 +230,7 @@ AYUDAS: dict[str, str] = {
     "sec": "Consulta SEC EDGAR (Form 4 y 13F) y STOCK Act. Sin esto no hay marcadores de insiders ni 13F y la "
            "cobertura de la Confiabilidad baja. Requiere Recalcular.",
     "valor_justo": "Dibuja en el gráfico de Análisis una línea con el valor justo consolidado de los modelos activos "
-                   "(pestaña Valor Justo). Es una estimación con supuestos, no un precio objetivo.",
+                   "(pestaña Valor Justo). Activado por defecto. Es una estimación con supuestos, no un precio objetivo.",
     "recalcular": "Descarga y calcula todo de nuevo para el ticker. Solo hace falta con un ticker nuevo o al cambiar "
                   "Backtest/SEC; capital y familias se actualizan solos.",
 }
@@ -1007,6 +1007,19 @@ def opciones_historico(serie: dict | None, esc: dict | None = None, mensaje: str
     return opc
 
 
+BARRAS_ALTO_FILA_ETIQUETA = 18   # px por fila de etiqueta de las lineas verticales (fuente 11 + padding)
+BARRAS_TOP_LEYENDA = 34          # px reservados arriba para la leyenda
+
+
+def filas_etiquetas_barras(valores: list[float | None]) -> dict[int, int]:
+    """Fila (0 = la mas cercana al area de trazado) de la etiqueta de cada linea vertical presente, por indice.
+
+    Cada linea tiene su propia fila (ordenadas de menor a mayor valor): dos lineas con valores casi iguales nunca
+    comparten fila, asi que sus etiquetas no se pisan. Las lineas ausentes (None) no ocupan fila."""
+    presentes = sorted((v, i) for i, v in enumerate(valores) if v is not None)
+    return {i: fila for fila, (_v, i) in enumerate(presentes)}
+
+
 def opciones_barras(esc: dict | None, precio: float | None = None, activos: dict[str, bool] | None = None,
                     mensaje: str | None = None) -> dict:
     """Opciones ECharts de las barras horizontales por modelo: DOS series (Escenario Medio y Pesimista) por modelo, lineas
@@ -1044,14 +1057,22 @@ def opciones_barras(esc: dict | None, precio: float | None = None, activos: dict
             datos[clave].append({"value": round(min(v, x_max), 2), "itemStyle": {"color": color, "opacity": 1.0 if activo else 0.45},
                                  "label": {"formatter": txt}})
 
-    def linea(valor: float | None, nombre: str, color: str, tipo: str, k: int) -> list[dict]:
+    filas = filas_etiquetas_barras([fm, fp, px])
+
+    def linea(valor: float | None, nombre: str, color: str, tipo: str, i: int) -> list[dict]:
         if valor is None:
             return []
+        # Etiquetas escalonadas en una franja SOBRE el area de trazado (una fila por linea: nunca se pisan aunque los
+        # valores sean casi iguales, ni tocan el eje inferior). Texto anclado a la linea: a su derecha, o a su izquierda
+        # si la linea esta en el ultimo 40 % del eje (no se sale por el margen derecho).
         return [{"xAxis": round(valor, 2), "lineStyle": {"color": color, "type": tipo, "width": 2},
                  "label": {"show": True, "formatter": f"{nombre} ${valor:,.2f}", "position": "start", "color": color,
-                           "fontSize": 11, "offset": [0, -16 * k]}}]
+                           "fontSize": 11, "backgroundColor": BG_ETIQUETA, "padding": [1, 4],
+                           "align": "right" if valor > 0.6 * x_max else "left", "verticalAlign": "bottom",
+                           "distance": 4, "offset": [0, -BARRAS_ALTO_FILA_ETIQUETA * filas[i]]}}]
     marca_data = (linea(fm, "Valor justo Medio", COLOR_FAIR_VALUE, "dashed", 0) + linea(fp, "Piso Pesimista", VJ_PESIMISTA, "dashed", 1)
                   + linea(px, "Precio", COLOR_PRECIO, "solid", 2))
+    n_filas = max(filas.values(), default=-1) + 1
     marca = {"symbol": "none", "silent": True, "animation": False, "data": marca_data}
     rotulo = {"show": True, "position": "right", "color": TXT, "fontSize": 11}
     series = [
@@ -1062,7 +1083,8 @@ def opciones_barras(esc: dict | None, precio: float | None = None, activos: dict
     return {**_estilo_base(),
             "title": {"text": mensaje or "", "left": "center", "top": "middle",
                       "textStyle": {"color": MUTED, "fontSize": 14, "fontWeight": "normal"}},
-            "grid": {"left": 190, "right": 90, "top": 64, "bottom": 28},
+            "grid": {"left": 190, "right": 90, "top": BARRAS_TOP_LEYENDA + BARRAS_ALTO_FILA_ETIQUETA * n_filas + 8,
+                     "bottom": 28},
             "legend": {"data": ["Escenario Medio", "Escenario Pesimista"], "top": 4, "textStyle": {"color": TXT, "fontSize": 12}},
             "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}, "backgroundColor": BG_POPUP, "borderColor": BORDE,
                         "textStyle": {"color": TXT, "fontSize": 12},
@@ -1077,7 +1099,7 @@ def opciones_barras(esc: dict | None, precio: float | None = None, activos: dict
 
 def alto_barras(n_modelos: int) -> int:
     """Alto en px del grafico de barras segun el numero de modelos (2 barras por modelo)."""
-    return max(420, 40 * n_modelos + 110)
+    return max(420, 40 * n_modelos + 110 + BARRAS_ALTO_FILA_ETIQUETA * 2)   # + franja de etiquetas escalonadas
 
 
 # --- Texto explicativo de los modelos (pestana Valor Justo, acordeon colapsable) ---------------------------------------
@@ -1206,6 +1228,38 @@ async def calcular_ticker(ticker: str, capital: float, backtest: bool = True, se
         return await run.cpu_bound(nucleo.analizar_ticker, ticker, capital, **kw)
     except (RuntimeError, BrokenProcessPool, PicklingError, OSError):
         return await asyncio.to_thread(nucleo.analizar_ticker, ticker, capital, **kw)
+
+
+VJ_LINEA_POR_DEFECTO = True   # "Mostrar Valor Justo" arranca ACTIVADO (local y nube)
+AVISO_CALCULO_RAPIDO = ("Cálculo rápido de valor justo: NO se ejecutó el backtest ni se consultó SEC (Form 4 / 13F / "
+                        "STOCK Act); Bounce, Fill rate, MAE, marcadores de insiders/13F y parte de la Confiabilidad no "
+                        "están disponibles. Pulsa «Recalcular» para el análisis completo.")
+
+
+async def calcular_valor_justo_rapido(ticker: str, capital: float) -> dict:
+    """Camino rapido de la pestana Valor Justo: ``main.analizar_ticker`` con ``backtest=False`` y ``sec=False``.
+
+    Las entradas del valor justo salen de XBRL (``fair_value.extraer_entradas``) y de yfinance; Form 4 / 13F / STOCK Act
+    (``sec``) no intervienen y el backtest walk-forward (~80 s) tampoco, asi que se omiten. Fuera del hilo de eventos."""
+    return await calcular_ticker(ticker, capital, backtest=False, sec=False)
+
+
+def fusionar_valor_justo_rapido(previo: dict | None, rapido: dict) -> dict:
+    """Resultado a guardar en CACHE tras el calculo rapido, SIN pisar un analisis mas completo.
+
+    - Si ya hay un resultado con precio para el ticker (Recalcular con o sin backtest, o un escaneo): se conserva entero
+      (zonas, backtest, SEC, avisos) y solo se le anaden las ``entradas_valoracion`` nuevas (dict nuevo: la Vista detecta
+      el cambio por identidad).
+    - Si no hay: se guarda el rapido con ``AVISO_CALCULO_RAPIDO`` en sus avisos (visible en Analisis) y
+      ``calculo_rapido=True``."""
+    if previo and previo.get("precio_actual") is not None:
+        if not rapido.get("entradas_valoracion"):
+            return previo
+        return {**previo, "entradas_valoracion": rapido["entradas_valoracion"]}
+    avisos = [str(a) for a in (rapido.get("avisos") or [])]
+    if AVISO_CALCULO_RAPIDO not in avisos:
+        avisos.append(AVISO_CALCULO_RAPIDO)
+    return {**rapido, "avisos": avisos, "calculo_rapido": True}
 
 
 def cargar_watchlist(ruta: str = RUTA_WATCHLIST) -> list[str]:
@@ -2216,6 +2270,7 @@ class Vista:
         self.grafico_datos: dict | None = None      # velas, SMA, Volume Profile y marcadores (pesado; solo si cambian)
         self.grafico_overlays: dict | None = None   # zonas, anclas, precio, valor justo medio y titulo (ligero)
         self._grafico_huella: tuple | None = None   # clave de grafico_datos ya enviada al navegador
+        self._grafico_pendiente = False             # cambio hecho con Analisis oculta: se envia al volver a la pestana
         self.ultimo_js_grafico: str = ""            # ultima sentencia JS enviada (diagnostico y pruebas)
 
     # ---- construccion
@@ -2253,7 +2308,9 @@ class Vista:
                     self._ayuda(clave)
             ui.separator()
             with ui.row().classes("w-full items-center no-wrap justify-between"):
-                self.sw_vj = ui.switch("Mostrar Valor Justo", value=False, on_change=lambda e: self._toggle_vj(e.value))
+                # Activado por defecto (local y nube): la linea del Escenario Medio se ve en cuanto hay entradas
+                self.sw_vj = ui.switch("Mostrar Valor Justo", value=VJ_LINEA_POR_DEFECTO,
+                                       on_change=lambda e: self._toggle_vj(e.value))
                 self._ayuda("valor_justo")
             with ui.row().classes("w-full items-center no-wrap justify-between"):
                 self.sw_bt = ui.switch("Backtest (lento)", value=True)
@@ -2350,6 +2407,14 @@ class Vista:
             ui.label(fv.AVISO).classes("text-caption")
             ui.label(fv.AVISO_ESCENARIOS).classes("text-caption")
         self.vj_msg = ui.label("").classes("txt-muted").props("data-vj=mensaje")
+        # Estado vacio (sin entradas para el ticker actual): calculo rapido SOLO del valor justo (sin backtest ni SEC)
+        with ui.row().classes("w-full items-center gap-3").props("data-vj=calcular") as fila_calc:
+            self.btn_vj_calc = ui.button("Calcular valor justo", icon="calculate", on_click=self.calcular_valor_justo) \
+                .props("unelevated color=primary data-accion=vj-calcular")
+            ui.label("Rápido: sin backtest ni consultas SEC Form 4 / 13F (segundos, no minutos). «Recalcular» en el panel "
+                     "lateral hace el análisis completo.").classes("text-caption txt-muted")
+        self.vj_fila_calc = fila_calc
+        self.vj_fila_calc.visible = False
         # ---- Bloque 1: resumen ejecutivo (4 tarjetas KPI)
         self.vj_kpi, self.vj_kpi_sub = {}, {}
         with ui.row().classes("w-full gap-3 items-stretch no-wrap overflow-auto").props("data-bloque=kpis"):
@@ -2578,6 +2643,62 @@ class Vista:
     def _toggle_vj(self, valor: bool) -> None:
         self.refrescar(solo_figura=True)
 
+    # ---- calculo rapido del valor justo (estado vacio de la pestana)
+    def _vj_boton_calcular(self, vacio: bool) -> None:
+        """Muestra «Calcular valor justo de <TICKER>» solo en el estado vacio con un ticker valido (no calcula nada)."""
+        if not hasattr(self, "btn_vj_calc"):
+            return
+        t = self.ticker
+        self.vj_fila_calc.visible = bool(vacio and t)
+        self.btn_vj_calc.text = f"Calcular valor justo de {t}" if t else "Calcular valor justo"
+        self.btn_vj_calc.set_enabled(not self.ocupado)
+
+    async def calcular_valor_justo(self) -> None:
+        """Boton del estado vacio: obtiene SOLO lo necesario para el valor justo (``backtest=False``, ``sec=False``) fuera
+        del hilo de eventos, con indicador de carga; guarda en CACHE sin pisar un analisis mas completo
+        (``fusionar_valor_justo_rapido``) y repinta la pestana y la linea de Analisis."""
+        ui = self.ui
+        if self.ocupado:
+            return
+        t = validar_ticker(self.ticker)
+        if t is None:
+            ui.notify("Elige un ticker válido primero (p. ej. NVDA o BRK-B)", type="warning")
+            return
+        cap = self._capital() or 1000.0
+        self._ocupar(True)
+        self.btn_vj_calc.props(add="loading")
+        self.vj_msg.text = f"Calculando el valor justo de {t} (sin backtest ni SEC)…"
+        try:
+            res = await calcular_valor_justo_rapido(t, cap)
+        except Exception as e:  # noqa: BLE001
+            ui.notify(f"Fallo inesperado al calcular el valor justo de {t}: {type(e).__name__}: {e}", type="negative",
+                      multi_line=True)
+            self._vj_actualizar()
+            return
+        finally:
+            self.btn_vj_calc.props(remove="loading")
+            self._ocupar(False)
+        if res.get("precio_actual") is None:
+            msg = "; ".join(res.get("errores") or ["sin datos"])
+            ui.notify(f"{t}: sin datos de mercado (ticker invalido o sin red). {msg}", type="negative",
+                      multi_line=True, timeout=8000)
+            self._vj_actualizar()
+            return
+        nuevo = fusionar_valor_justo_rapido(CACHE.get(t), res)
+        CACHE[t] = nuevo
+        ok = bool(nuevo.get("entradas_valoracion"))
+        del res, nuevo
+        if not ok:
+            ui.notify(f"{t}: no se pudieron obtener las entradas de valoración (ver Avisos en Análisis).", type="warning",
+                      multi_line=True)
+        else:
+            ui.notify(f"{t}: valor justo calculado (sin backtest; «Recalcular» hace el análisis completo).", type="positive")
+        if t == self.ticker:
+            self.refrescar()       # KPIs, barras, serie y linea del Escenario Medio en Analisis
+        if t != self.ticker or not ok:
+            self._vj_actualizar()  # otro ticker elegido mientras tanto, o sin entradas: repinta el estado vacio
+        liberar_memoria()
+
     def _vj_para_grafico(self) -> dict | None:
         """Escenarios para la linea del grafico de Analisis (``valor_justo_medio`` toma SOLO el Medio); None si el
         interruptor esta apagado o no hay entradas."""
@@ -2608,6 +2729,28 @@ class Vista:
     def _tab_cambiada(self, valor: Any) -> None:
         if valor == "valor_justo":
             self._vj_resize()
+        elif valor == "analisis":
+            self._grafico_reaplicar()
+
+    def _analisis_visible(self) -> bool:
+        """True si la pestana Analisis es la activa (``tabs.value`` es el objeto Tab al inicio y luego su nombre)."""
+        tabs = getattr(self, "tabs", None)
+        if tabs is None:
+            return True
+        v = tabs.value
+        nombre = v if isinstance(v, str) or v is None else getattr(v, "props", {}).get("name")
+        return nombre in (None, "analisis")
+
+    def _grafico_reaplicar(self) -> None:
+        """Al volver a Analisis envia el ultimo estado completo del grafico si algo cambio mientras estaba oculto.
+
+        Con otra pestana activa el contenedor del grafico esta fuera del DOM: un calculo hecho desde Valor Justo (boton
+        rapido o Recalcular) o desde el ranking no se envia (el JS agotaria sus reintentos de montaje y el grafico
+        quedaria en «Sin datos»); se marca pendiente y aqui se manda una vez con velas + overlays vigentes."""
+        if not self._grafico_pendiente or not getattr(self, "grafico_id", None):
+            return
+        self._grafico_pendiente = False
+        self._grafico_js(js_actualizar(self.grafico_id, tema_grafico(), self.grafico_datos, self.grafico_overlays))
 
     @staticmethod
     def _echart_set(chart: Any, opciones: dict) -> None:
@@ -2700,11 +2843,15 @@ class Vista:
         px = _num(res.get("precio_actual"))
         self._vj_silencio = True
         try:
+            self._vj_boton_calcular(esc is None)
             if esc is None:
+                t = self.ticker
                 self.vj_msg.text = ("Pulsa Recalcular para analizar el ticker y obtener las entradas de valoración."
-                                    if not res else
+                                    if not t else
+                                    f"Sin entradas de valoración para {t}: pulsa «Calcular valor justo de {t}» (rápido) "
+                                    "o Recalcular para el análisis completo." if not res else
                                     "Este análisis no trae entradas de valoración (ver Avisos en Análisis); pulsa "
-                                    "Recalcular.")
+                                    f"«Calcular valor justo de {t}» o Recalcular.")
                 for k in self.vj_kpi:
                     self.vj_kpi[k].text = "n/d" if k != "incert" else ""
                 for k in self.vj_kpi_sub:
@@ -2724,7 +2871,8 @@ class Vista:
                 self._vj_expl_firma = None
                 self._vj_seq_serie += 1
                 self._vj_cargando(False)
-                self._vj_pintar_serie(None, "Pulsa Recalcular para analizar un ticker")
+                self._vj_pintar_serie(None, f"Pulsa «Calcular valor justo de {t}» (arriba)" if t else
+                                      "Pulsa Recalcular para analizar un ticker")
                 return
             self.vj_msg.text = ""
             med, pes = esc["medio"], esc["pesimista"]
@@ -3100,6 +3248,8 @@ class Vista:
             self.btn.props(remove="loading")
         self.btn.set_enabled(not activo)
         self.btn_scan.set_enabled(not activo)
+        if hasattr(self, "btn_vj_calc"):
+            self.btn_vj_calc.set_enabled(not activo)
 
     async def recalcular(self) -> None:
         ui = self.ui
@@ -3249,6 +3399,10 @@ class Vista:
             self._grafico_huella = huella
         self.grafico_overlays = overlays_grafico(self.grafico_datos, ticker, zonas, res.get("precio_actual"), anclas,
                                                  self.nivel_sel, sub, vj)
+        if not self._analisis_visible():   # contenedor fuera del DOM: se envia al volver a Analisis (_grafico_reaplicar)
+            self._grafico_pendiente = True
+            return
+        self._grafico_pendiente = False
         self._grafico_js(js_actualizar(self.grafico_id, tema_grafico(), self.grafico_datos if enviar else None,
                                        self.grafico_overlays))
 

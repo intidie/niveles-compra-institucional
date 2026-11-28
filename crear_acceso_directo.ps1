@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   El acceso directo ejecuta  <repo>\.venv\Scripts\pythonw.exe app_ui.py  con la carpeta del repo como directorio de
-  trabajo y la ventana minimizada (pythonw no abre consola; app_ui.py redirige stdout/stderr a devnull si no existen).
+  trabajo y ventana normal (pythonw no abre consola; app_ui.py redirige stdout/stderr a devnull si no existen).
   La carpeta del repo se deduce de la ubicacion de este script ($PSScriptRoot), asi que sirve en cualquier equipo.
   El Escritorio se obtiene con [Environment]::GetFolderPath('Desktop') (respeta OneDrive y redirecciones).
 
@@ -41,9 +41,9 @@ $lnk = $shell.CreateShortcut($destino)
 $lnk.TargetPath = $pythonw
 $lnk.Arguments = 'app_ui.py'
 $lnk.WorkingDirectory = $repo
-$lnk.WindowStyle = 7                        # 7 = minimizada (pedido por el usuario). pythonw no abre consola, asi que
-                                            # solo afecta a la ventana de la app: con la ventana nativa (pywebview) puede
-                                            # arrancar minimizada; si molesta, cambiar a 1 (normal) y volver a ejecutar.
+$lnk.WindowStyle = 1                        # 1 = normal. pythonw no abre consola, asi que no hay nada que ocultar; con 7
+                                            # (minimizada) la ventana nativa de la app arrancaba minimizada en la barra de
+                                            # tareas y parecia que el programa no se abria.
 $lnk.IconLocation = "$pythonw,0"            # icono del propio pythonw.exe (no se anade ningun binario al repo)
 $lnk.Description = 'Screener de niveles de compra institucionales'
 $lnk.Save()

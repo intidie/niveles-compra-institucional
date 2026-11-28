@@ -901,7 +901,7 @@ def test_vista_tab_valor_justo_y_controles(cliente, vista):
     assert {e.props.get("data-accion") for e in els} >= {"vj-todos", "vj-dcf", "vj-multiplos", "vj-reset"}
     assert [e.props["data-slider"] for e in els if isinstance(e, ui.slider)] == ["wacc", "g", "mos"]
     sw = next(e for e in els if isinstance(e, ui.switch) and e.text == "Mostrar Valor Justo")
-    assert sw.value is False
+    assert sw.value is True          # activado por defecto: la linea del Escenario Medio se ve sin tocar nada
     assert "propietaria" in " ".join(str(getattr(e, "text", "")) for e in els if isinstance(e, ui.label))
 
 
@@ -1063,6 +1063,8 @@ def test_vista_slider_con_debounce_recalcula_una_sola_vez(vista, monkeypatch):
 
 
 def test_vista_toggle_mostrar_valor_justo_en_analisis(vista):
+    assert _anot_fair(vista)                              # activado por defecto: la linea ya esta
+    vista.sw_vj.value = False
     assert not _anot_fair(vista)
     vista.sw_vj.value = True
     txt = _anot_fair(vista)

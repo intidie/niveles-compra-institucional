@@ -29,8 +29,9 @@ EV/EBITDA, EV/Ingresos, P/B, P/FCF; DDM; EPV; Graham; Lynch) con los estados fin
 escenarios: Medio y Pesimista** (no hay optimista). Muestra 4 tarjetas (precio, valor justo Medio, piso fundamental
 Pesimista y diagnóstico de valoración con su incertidumbre), un gráfico histórico con bandas de ±10/20/30 % y, en
 acordeones, las barras por modelo, la activación de modelos y los sliders de WACC, g y margen de seguridad (se recalculan
-al instante, sin consultar nada). El interruptor **Mostrar Valor Justo** dibuja en Análisis solo la línea del Escenario
-Medio.
+al instante, sin consultar nada). El interruptor **Mostrar Valor Justo** (activado por defecto) dibuja en Análisis solo la línea del Escenario
+Medio. Si el ticker aún no tiene datos, el botón **Calcular valor justo de <TICKER>** de esa pestaña lo obtiene en segundos
+(sin backtest ni consultas Form 4 / 13F); **Recalcular** hace el análisis completo.
 
 Lectura honesta: ambos escenarios son **supuestos fijados de antemano, no predicciones**. Con el tope de crecimiento
 de 42 % durante 3 años, márgenes de hasta 55 % y g de 3,5 %, el Medio puede dar valores muy por encima del precio en
@@ -62,7 +63,9 @@ powershell -ExecutionPolicy Bypass -File .\crear_acceso_directo.ps1
 
 Crea `Niveles Institucionales.lnk` en tu Escritorio (la ruta real de `[Environment]::GetFolderPath('Desktop')`, que
 respeta OneDrive y otras redirecciones). Ejecuta `.venv\Scripts\pythonw.exe app_ui.py` desde la carpeta del repositorio
-(la deduce de la ubicación del script), con `WindowStyle = 7` (minimizada; sin consola con `pythonw`, solo afecta a la ventana de la app: si arranca minimizada, cambia el valor a 1 en el script y vuelve a ejecutarlo) y usando el icono de `pythonw.exe`. Requiere haber
+(la deduce de la ubicación del script), con ventana normal (`WindowStyle = 1`; `pythonw` no abre consola) y usando el
+icono de `pythonw.exe`. Abre una ventana de escritorio nativa si `pywebview` está instalado en `.venv` (viene en
+`requirements.txt`); si no, abre la app en el navegador en http://127.0.0.1:8080. Requiere haber
 creado el entorno virtual (ver abajo); si falta `pythonw.exe` o `app_ui.py` el script se detiene con un mensaje claro.
 Como `pythonw` no tiene consola, `app_ui.py` redirige la salida estándar a un dispositivo nulo al arrancar.
 

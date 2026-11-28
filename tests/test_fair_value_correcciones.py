@@ -94,7 +94,8 @@ def test_mover_controles_con_el_interruptor_apagado_no_reconstruye_el_grafico_de
     llamadas = []
     orig = ui_mod.overlays_grafico
     monkeypatch.setattr(ui_mod, "overlays_grafico", lambda *a, **k: llamadas.append(1) or orig(*a, **k))
-    assert vista.sw_vj.value is False
+    vista.sw_vj.value = False                      # activado por defecto: se apaga para la prueba
+    llamadas.clear()
     vista.vj_sl["wacc"].value = 11.0
     vista.vj_rows["pe"]["chk"].value = False
     vista._vj_seleccionar(ui_mod.ids_por_familia("DCF"))
